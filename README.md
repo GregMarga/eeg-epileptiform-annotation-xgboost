@@ -84,6 +84,8 @@ EDF recording.
 ## Classification and Evaluation
 
 Classification is performed using an **XGBoost** binary classifier.
+No explicit feature normalization was applied, as tree-based models (XGBoost)
+are invariant to monotonic feature scaling.
 
 ### Evaluation Protocol
 - A **Leave-One-Patient-Out (LOPO)** scheme is used.
