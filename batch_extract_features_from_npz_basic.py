@@ -27,7 +27,7 @@ def rms_amplitude(x: np.ndarray) -> float:
 def extract_features_for_one_window(window_2d: np.ndarray, fs: float) -> np.ndarray:
     """
     window_2d: (n_channels, n_samples)
-    returns: (n_channels * 6,) feature vector
+    returns: (n_channels * 6) feature vector
     """
     n_ch = window_2d.shape[0]
     feats = []

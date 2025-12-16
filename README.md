@@ -109,7 +109,15 @@ more advanced or patient-specific models.
 
 ---
 
+
 ## Notes
 - No patient-specific tuning or fine-tuning is applied.
 - The focus of this repository is on clarity, reproducibility, and
   patient-independent evaluation.
+
+---
+
+## Installation
+
+```bash
+pip install -r requirements.txt
