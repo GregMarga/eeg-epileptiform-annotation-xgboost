@@ -45,7 +45,7 @@ def sensitivity_specificity(y_true, y_pred):
 # -------------------------------------------------
 
 def main():
-    in_dir = Path("../../data/features_cache_basic")
+    in_dir = Path("../../../data/features_cache_basic")
     files = sorted(in_dir.glob("*_features.npz"))
     if not files:
         raise RuntimeError("No *_features.npz files found")
@@ -167,7 +167,7 @@ def main():
         m, s = mean_std(k)
         print(f"{k:7s}: {m:.4f} ± {s:.4f}")
 
-    out = Path("../../data/lopo_xgb_results.npy")
+    out = Path("../../../data/lopo_xgb_results.npy")
     np.save(out, results, allow_pickle=True)
     print(f"\nSaved per-patient results to {out}")
 
