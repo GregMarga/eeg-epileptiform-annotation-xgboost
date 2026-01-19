@@ -33,6 +33,12 @@ def load_features(npz_path: Path):
     return X, y
 
 
+def load_features_X_only(npz_path: Path):
+    z = np.load(npz_path, allow_pickle=True)
+    X = z["X"].astype(np.float32)
+    return X
+
+
 def sensitivity_specificity(y_true, y_pred):
     tn, fp, fn, tp = confusion_matrix(y_true, y_pred, labels=[0, 1]).ravel()
     sens = tp / (tp + fn) if (tp + fn) > 0 else 0.0
@@ -41,19 +47,25 @@ def sensitivity_specificity(y_true, y_pred):
 
 
 # -------------------------------------------------
-# Main LOPO pipeline
+# Main pipeline
 # -------------------------------------------------
 
 def main():
     in_dir = Path("../../../data/features_cache_basic")
+    test_dir = Path("../../test/features_cache_basic")
     files = sorted(in_dir.glob("*_features.npz"))
     if not files:
         raise RuntimeError("No *_features.npz files found")
 
     # group files by patient (Pxx)
     patient_files: dict[str, list[Path]] = {}
+    skipped_first_p20 = False
     for f in files:
         pid = patient_from_filename(f.name)
+        if pid == "P20" and not skipped_first_p20:
+            print(f"Skipping first P20: {f.name}")
+            skipped_first_p20 = True
+            continue
         if pid is None:
             print(f"Skipping (no patient id): {f.name}")
             continue
@@ -66,110 +78,65 @@ def main():
     results = []
 
     # -------------------------------------------------
-    # Leave-One-Patient-Out
+    # Use all patients, except p20, for training and test on p20 full eeg segmented into sliding windows
     # -------------------------------------------------
-    for test_pid in patients:
-        print(f"\n[LOPO] Test patient = {test_pid}")
 
-        x_train_list, y_train_list = [], []
-        x_test_list, y_test_list = [], []
+    x_train_list, y_train_list = [], []
 
-        for pid, flist in patient_files.items():
-            for f in flist:
-                x, y = load_features(f)
-                if pid == test_pid:
-                    x_test_list.append(x)
-                    y_test_list.append(y)
-                else:
-                    x_train_list.append(x)
-                    y_train_list.append(y)
+    for pid, flist in patient_files.items():
+        for f in flist:
+            x, y = load_features(f)
+            x_train_list.append(x)
+            y_train_list.append(y)
 
-        x_train = np.concatenate(x_train_list, axis=0)
-        y_train = np.concatenate(y_train_list, axis=0)
-        x_test = np.concatenate(x_test_list, axis=0)
-        y_test = np.concatenate(y_test_list, axis=0)
+    x_train = np.concatenate(x_train_list, axis=0)
+    y_train = np.concatenate(y_train_list, axis=0)
 
-        print(
-            f"  Train windows: {len(y_train)} (pos={int(y_train.sum())}) | "
-            f"Test windows: {len(y_test)} (pos={int(y_test.sum())})"
-        )
+    p20_file = test_dir / "P20_GHB_00015_0000348_full_features.npz"
 
-        # handle class imbalance
-        pos = int(y_train.sum())
-        neg = int((y_train == 0).sum())
-        scale_pos_weight = (neg / pos) if pos > 0 else 1.0
+    if not p20_file.exists():
+        raise RuntimeError(f"File not found: {p20_file}")
 
-        model = XGBClassifier(
-            n_estimators=400,
-            learning_rate=0.05,
-            max_depth=4,
-            subsample=0.8,
-            colsample_bytree=0.8,
-            objective="binary:logistic",
-            eval_metric="logloss",
-            tree_method="hist",
-            n_jobs=-1,
-            scale_pos_weight=scale_pos_weight,
-        )
+    x_test = load_features_X_only(p20_file)
 
-        model.fit(x_train, y_train)
+    # handle class imbalance
+    pos = int(y_train.sum())
+    neg = int((y_train == 0).sum())
+    scale_pos_weight = (neg / pos) if pos > 0 else 1.0
 
-        # inference
-        y_proba = model.predict_proba(x_test)[:, 1]
-        y_pred = (y_proba >= 0.5).astype(np.uint8)
+    model = XGBClassifier(
+        n_estimators=400,
+        learning_rate=0.05,
+        max_depth=4,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        objective="binary:logistic",
+        eval_metric="logloss",
+        tree_method="hist",
+        n_jobs=-1,
+        scale_pos_weight=scale_pos_weight,
+    )
 
-        acc = accuracy_score(y_test, y_pred)
-        bacc = balanced_accuracy_score(y_test, y_pred)
-        f1 = f1_score(y_test, y_pred, zero_division=0)
-        sens, spec = sensitivity_specificity(y_test, y_pred)
+    model.fit(x_train, y_train)
 
-        if len(np.unique(y_test)) == 2:
-            roc = roc_auc_score(y_test, y_proba)
-            pr = average_precision_score(y_test, y_proba)
-        else:
-            roc = np.nan
-            pr = np.nan
+    # inference
+    y_proba = model.predict_proba(x_test)[:, 1]
+    y_pred = (y_proba >= 0.5).astype(np.uint8)
+    pos_idx = np.where(y_pred == 1)[0]
 
-        print(
-            f"  bAcc={bacc:.3f} F1={f1:.3f} "
-            f"Sens={sens:.3f} Spec={spec:.3f} "
-            f"ROC-AUC={roc if not np.isnan(roc) else 'NA'}"
-        )
+    sfreq = 256
+    step = 0.25  # in sec
+    step_sample = int(round(step * sfreq))
+    centers_in_sec = []
+    for index in pos_idx:
+        start_sample = index * step_sample
+        center_sample = int(start_sample + step_sample)
+        center_sec = center_sample / sfreq
+        centers_in_sec.append(center_sec)
 
-        results.append(
-            dict(
-                patient=test_pid,
-                n_train=len(y_train),
-                n_test=len(y_test),
-                pos_train=int(y_train.sum()),
-                pos_test=int(y_test.sum()),
-                acc=acc,
-                bacc=bacc,
-                f1=f1,
-                sens=sens,
-                spec=spec,
-                roc_auc=roc,
-                pr_auc=pr,
-            )
-        )
+    print(f"{len(pos_idx)}/{len(x_test)}")
+    print(centers_in_sec)
 
-    # -------------------------------------------------
-    # Summary
-    # -------------------------------------------------
-    print("\n=== LOPO summary (mean ± std) ===")
-
-    def mean_std(key):
-        vals = np.array([r[key] for r in results], dtype=float)
-        vals = vals[~np.isnan(vals)]
-        return vals.mean(), vals.std()
-
-    for k in ["acc", "bacc", "f1", "sens", "spec", "roc_auc", "pr_auc"]:
-        m, s = mean_std(k)
-        print(f"{k:7s}: {m:.4f} ± {s:.4f}")
-
-    out = Path("../../../data/lopo_xgb_results.npy")
-    np.save(out, results, allow_pickle=True)
-    print(f"\nSaved per-patient results to {out}")
 
 
 if __name__ == "__main__":
