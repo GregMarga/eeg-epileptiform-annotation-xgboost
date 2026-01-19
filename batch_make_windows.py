@@ -11,7 +11,7 @@ def patient_id_from_filename(filename: str):
 
 
 def main():
-    data_dir = Path("../../data")
+    data_dir = Path("../../../data")
     out_dir = data_dir / "windows_cache"
     out_dir.mkdir(parents=True, exist_ok=True)
 
