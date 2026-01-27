@@ -132,7 +132,7 @@ def main():
     model.fit(x_train, y_train)
 
     # inference
-    threshold_values = np.linspace(0.5, 1.0, 101)
+    threshold_values = np.linspace(0.0, 1.0, 101)
     y_proba = model.predict_proba(x_test)[:, 1]
     threshold_recall=[]
     for thres in threshold_values:
@@ -158,6 +158,16 @@ def main():
     threshold_recall_sorted = sorted(threshold_recall, key=lambda x: (x[1]), reverse=True)
     thr_arr = np.array([t for t, r in threshold_recall], dtype=float)
     rec_arr = np.array([r for t, r in threshold_recall], dtype=float)
+
+    out_recall = Path("../data/p20_recall_curve.npz")
+
+    np.savez(
+        out_recall,
+        thresholds=thr_arr.astype(np.float32),
+        recall=rec_arr.astype(np.float32),
+    )
+
+    print(f"Saved recall curve to {out_recall}")
 
     plt.figure()
     plt.plot(thr_arr, rec_arr)
