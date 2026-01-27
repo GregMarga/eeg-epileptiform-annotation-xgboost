@@ -92,7 +92,7 @@ def create_sliding_windows_from_eeg(
     edf_files = sorted(data_dir.glob("*.edf"))
 
     raw = mne.io.read_raw_edf(
-        "../../../data/P20_GHB_00015_0000348.edf",
+        "../data/P20_GHB_00015_0000348.edf",
         preload=True
     )
 
@@ -220,7 +220,7 @@ def process_np_windows_one_patient(windows, sfreq: float, ch_names, out_dir: Pat
 
 
 def main():
-    out_dir = Path("../../test/features_cache_basic")
+    out_dir = Path("../test/features_cache_basic")
 
     epochs, sfreq, ch_names, bad_chs = create_sliding_windows_from_eeg(
         l_freq=0.5, h_freq=40.0, high_factor=8.0, low_factor=10.0,

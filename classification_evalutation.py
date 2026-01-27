@@ -1,6 +1,9 @@
 import re
+from operator import truediv
 from pathlib import Path
 import numpy as np
+import mne
+import matplotlib.pyplot as plt
 
 from xgboost import XGBClassifier
 from sklearn.metrics import (
@@ -51,13 +54,22 @@ def sensitivity_specificity(y_true, y_pred):
 # -------------------------------------------------
 
 def main():
-    in_dir = Path("../../../data/features_cache_basic")
-    test_dir = Path("../../test/features_cache_basic")
+    in_dir = Path("../data/features_cache_basic")
+    test_dir = Path("../test/features_cache_basic")
     files = sorted(in_dir.glob("*_features.npz"))
     if not files:
         raise RuntimeError("No *_features.npz files found")
 
     # group files by patient (Pxx)
+    raw = mne.io.read_raw_edf("../data/P20_GHB_00015_0000348.edf", preload=False, verbose="ERROR")
+    ann = raw.annotations
+
+    pos_ann_onsets = np.array([on for on, desc in zip(ann.onset, ann.description) if "*" in desc], dtype=float)
+    pos_ann_onsets.sort()
+
+    win_sec=0.5
+    hop_sec=0.25
+
     patient_files: dict[str, list[Path]] = {}
     skipped_first_p20 = False
     for f in files:
@@ -120,22 +132,56 @@ def main():
     model.fit(x_train, y_train)
 
     # inference
+    threshold_values = np.linspace(0.5, 1.0, 101)
     y_proba = model.predict_proba(x_test)[:, 1]
-    y_pred = (y_proba >= 0.5).astype(np.uint8)
-    pos_idx = np.where(y_pred == 1)[0]
+    threshold_recall=[]
+    for thres in threshold_values:
+        y_pred = (y_proba >= thres).astype(np.uint8)
+        pos_idx = np.where(y_pred == 1)[0]
+        pos_set = set(pos_idx) # hashed for better performance
 
-    sfreq = 256
-    step = 0.25  # in sec
-    step_sample = int(round(step * sfreq))
-    centers_in_sec = []
-    for index in pos_idx:
-        start_sample = index * step_sample
-        center_sample = int(start_sample + step_sample)
-        center_sec = center_sample / sfreq
-        centers_in_sec.append(center_sec)
+        hits=0;
 
-    print(f"{len(pos_idx)}/{len(x_test)}")
-    print(centers_in_sec)
+        for t in pos_ann_onsets:
+            i_min= int(np.ceil((t-win_sec)/hop_sec))  #find the range of indexes that could correspond to the actual annotations
+            i_max=int(np.floor(t/hop_sec))
+
+            hit=False
+            for i in range(i_min,i_max+1):
+                if i in pos_set:
+                    hit=True
+                    break
+            if hit:
+                hits+=1
+        recall=hits/len(pos_ann_onsets)
+        threshold_recall.append((thres,recall))
+    threshold_recall_sorted = sorted(threshold_recall, key=lambda x: (x[1]), reverse=True)
+    thr_arr = np.array([t for t, r in threshold_recall], dtype=float)
+    rec_arr = np.array([r for t, r in threshold_recall], dtype=float)
+
+    plt.figure()
+    plt.plot(thr_arr, rec_arr)
+    plt.xlabel("Threshold")
+    plt.ylabel("Recall (event hit rate)")
+    plt.title("Recall vs Threshold")
+    plt.grid(True)
+    plt.show()
+
+    print("\nTop 10 thresholds by recall:")
+    for thr, rec in threshold_recall_sorted[:10]:
+        print(f"thr={thr:.2f}  recall={rec:.3f} ")
+        # sfreq = 256
+        # step = 0.25  # in sec
+        # step_sample = int(round(step * sfreq))
+        # centers_in_sec = []
+        # for index in pos_idx:
+        #     start_sample = index * step_sample
+        #     center_sample = int(start_sample + step_sample)
+        #     center_sec = center_sample / sfreq
+        #     centers_in_sec.append(center_sec)
+        #
+        # print(f"{len(pos_idx)}/{len(x_test)}")
+        # print(centers_in_sec)
 
 
 
