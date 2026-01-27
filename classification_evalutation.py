@@ -1,6 +1,7 @@
 import re
 from pathlib import Path
 import numpy as np
+import matplotlib.pyplot as plt
 
 from xgboost import XGBClassifier
 from sklearn.metrics import (
@@ -45,7 +46,7 @@ def sensitivity_specificity(y_true, y_pred):
 # -------------------------------------------------
 
 def main():
-    in_dir = Path("../../../data/features_cache_basic")
+    in_dir = Path("../data/features_cache_basic")
     files = sorted(in_dir.glob("*_features.npz"))
     if not files:
         raise RuntimeError("No *_features.npz files found")
@@ -68,6 +69,8 @@ def main():
     # -------------------------------------------------
     # Leave-One-Patient-Out
     # -------------------------------------------------
+    threshold_values = np.linspace(0.0, 1.0, 101)
+    all_f1_curves = []  # will store one f1-curve per patient (len = n_thresholds)
     for test_pid in patients:
         print(f"\n[LOPO] Test patient = {test_pid}")
 
@@ -115,14 +118,12 @@ def main():
         model.fit(x_train, y_train)
 
         # inference
+        # inference
         y_proba = model.predict_proba(x_test)[:, 1]
-        y_pred = (y_proba >= 0.5).astype(np.uint8)
 
-        acc = accuracy_score(y_test, y_pred)
-        bacc = balanced_accuracy_score(y_test, y_pred)
-        f1 = f1_score(y_test, y_pred, zero_division=0)
-        sens, spec = sensitivity_specificity(y_test, y_pred)
+        f1_curve = []  # F1 for this patient across thresholds
 
+        # (optional) AUCs do not depend on threshold, compute once
         if len(np.unique(y_test)) == 2:
             roc = roc_auc_score(y_test, y_proba)
             pr = average_precision_score(y_test, y_proba)
@@ -130,33 +131,46 @@ def main():
             roc = np.nan
             pr = np.nan
 
-        print(
-            f"  bAcc={bacc:.3f} F1={f1:.3f} "
-            f"Sens={sens:.3f} Spec={spec:.3f} "
-            f"ROC-AUC={roc if not np.isnan(roc) else 'NA'}"
-        )
+        for thres in threshold_values:
+            y_pred = (y_proba >= thres).astype(np.uint8)
 
-        results.append(
-            dict(
-                patient=test_pid,
-                n_train=len(y_train),
-                n_test=len(y_test),
-                pos_train=int(y_train.sum()),
-                pos_test=int(y_test.sum()),
-                acc=acc,
-                bacc=bacc,
-                f1=f1,
-                sens=sens,
-                spec=spec,
-                roc_auc=roc,
-                pr_auc=pr,
+            acc = accuracy_score(y_test, y_pred)
+            bacc = balanced_accuracy_score(y_test, y_pred)
+            f1 = f1_score(y_test, y_pred, zero_division=0)
+            sens, spec = sensitivity_specificity(y_test, y_pred)
+
+            f1_curve.append(f1)
+
+            # store per (patient, threshold) if you want (recommended)
+            results.append(
+                dict(
+                    patient=test_pid,
+                    threshold=float(thres),
+                    n_train=len(y_train),
+                    n_test=len(y_test),
+                    pos_train=int(y_train.sum()),
+                    pos_test=int(y_test.sum()),
+                    acc=acc,
+                    bacc=bacc,
+                    f1=f1,
+                    sens=sens,
+                    spec=spec,
+                    roc_auc=roc,
+                    pr_auc=pr,
+                )
             )
-        )
+
+        all_f1_curves.append(np.array(f1_curve, dtype=float))
+
+        # optional: print best threshold for this patient
+        best_i = int(np.argmax(all_f1_curves[-1]))
+        print(
+            f"  best F1={all_f1_curves[-1][best_i]:.3f} at thr={threshold_values[best_i]:.2f} | ROC-AUC={roc if not np.isnan(roc) else 'NA'}")
 
     # -------------------------------------------------
     # Summary
     # -------------------------------------------------
-    print("\n=== LOPO summary (mean ± std) ===")
+    # print("\n=== LOPO summary (mean ± std) ===")
 
     def mean_std(key):
         vals = np.array([r[key] for r in results], dtype=float)
@@ -165,11 +179,38 @@ def main():
 
     for k in ["acc", "bacc", "f1", "sens", "spec", "roc_auc", "pr_auc"]:
         m, s = mean_std(k)
-        print(f"{k:7s}: {m:.4f} ± {s:.4f}")
+        # print(f"{k:7s}: {m:.4f} ± {s:.4f}")
 
-    out = Path("../../../data/lopo_xgb_results.npy")
-    np.save(out, results, allow_pickle=True)
-    print(f"\nSaved per-patient results to {out}")
+    out = Path("../data/lopo_xgb_results.npy")
+    # np.save(out, results, allow_pickle=True)
+    # print(f"\nSaved per-patient results to {out}")
+
+    f1_matrix = np.stack(all_f1_curves, axis=0)  # shape: (n_patients, n_thresholds)
+    mean_f1 = f1_matrix.mean(axis=0)
+    std_f1 = f1_matrix.std(axis=0)
+
+    best_i = int(np.argmax(mean_f1))
+    print(
+        f"\nBest mean-F1 threshold: thr={threshold_values[best_i]:.2f}  meanF1={mean_f1[best_i]:.4f} ± {std_f1[best_i]:.4f}")
+
+    #save results
+    out_curve = Path("../data/lopo_f1_curve.npz")
+    np.savez(
+        out_curve,
+        thresholds=threshold_values.astype(np.float32),
+        mean_f1=mean_f1.astype(np.float32),
+        std_f1=std_f1.astype(np.float32),
+    )
+    print(f"Saved F1 curve to {out_curve}")
+
+    # plot
+    plt.figure()
+    plt.plot(threshold_values, mean_f1)
+    plt.xlabel("Threshold")
+    plt.ylabel("Mean F1 (across patients)")
+    plt.title("LOPO: Mean F1 vs Threshold")
+    plt.grid(True)
+    plt.show()
 
 
 if __name__ == "__main__":
