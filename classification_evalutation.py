@@ -134,52 +134,43 @@ def main():
     # inference
     threshold_values = np.linspace(0.0, 1.0, 101)
     y_proba = model.predict_proba(x_test)[:, 1]
-    threshold_recall=[]
+    print("y_proba stats:",
+          "min", float(y_proba.min()),
+          "p50", float(np.median(y_proba)),
+          "p90", float(np.quantile(y_proba, 0.90)),
+          "max", float(y_proba.max()))
+    for th in [0.1, 0.5, 0.9]:
+        y_pred = (y_proba >= th).astype(np.uint8)
+        print(th, "hit_ratio", float(y_pred.mean()))
+    threshold_hits=[]
     for thres in threshold_values:
         y_pred = (y_proba >= thres).astype(np.uint8)
         pos_idx = np.where(y_pred == 1)[0]
-        pos_set = set(pos_idx) # hashed for better performance
 
-        hits=0;
+        hit_ratio=len(pos_idx)/len(y_pred)
+        threshold_hits.append((thres,hit_ratio))
 
-        for t in pos_ann_onsets:
-            i_min= int(np.ceil((t-win_sec)/hop_sec))  #find the range of indexes that could correspond to the actual annotations
-            i_max=int(np.floor(t/hop_sec))
+    thr_arr = np.array([t for t, r in threshold_hits], dtype=float)
+    hits_arr = np.array([r for t, r in threshold_hits], dtype=float)
 
-            hit=False
-            for i in range(i_min,i_max+1):
-                if i in pos_set:
-                    hit=True
-                    break
-            if hit:
-                hits+=1
-        recall=hits/len(pos_ann_onsets)
-        threshold_recall.append((thres,recall))
-    threshold_recall_sorted = sorted(threshold_recall, key=lambda x: (x[1]), reverse=True)
-    thr_arr = np.array([t for t, r in threshold_recall], dtype=float)
-    rec_arr = np.array([r for t, r in threshold_recall], dtype=float)
-
-    out_recall = Path("../data/p20_recall_curve.npz")
+    out_hit_ratio = Path("../data/p20_hit_ratio_curve.npz")
 
     np.savez(
-        out_recall,
+        out_hit_ratio,
         thresholds=thr_arr.astype(np.float32),
-        recall=rec_arr.astype(np.float32),
+        hit_ratio=hits_arr.astype(np.float32),
     )
 
-    print(f"Saved recall curve to {out_recall}")
+    print(f"Saved hit-ratio curve to {out_hit_ratio}")
 
     plt.figure()
-    plt.plot(thr_arr, rec_arr)
+    plt.plot(thr_arr, hits_arr)
     plt.xlabel("Threshold")
-    plt.ylabel("Recall (event hit rate)")
-    plt.title("Recall vs Threshold")
+    plt.ylabel("Hit Ratio (pos/total windows)")
+    plt.title("Hit Ratio vs Threshold")
     plt.grid(True)
     plt.show()
 
-    print("\nTop 10 thresholds by recall:")
-    for thr, rec in threshold_recall_sorted[:10]:
-        print(f"thr={thr:.2f}  recall={rec:.3f} ")
         # sfreq = 256
         # step = 0.25  # in sec
         # step_sample = int(round(step * sfreq))
