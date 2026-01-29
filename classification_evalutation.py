@@ -4,14 +4,6 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from xgboost import XGBClassifier
-from sklearn.metrics import (
-    accuracy_score,
-    balanced_accuracy_score,
-    f1_score,
-    confusion_matrix,
-    roc_auc_score,
-    average_precision_score,
-)
 
 
 # -------------------------------------------------
@@ -34,22 +26,67 @@ def load_features(npz_path: Path):
     return X, y
 
 
-def sensitivity_specificity(y_true, y_pred):
-    tn, fp, fn, tp = confusion_matrix(y_true, y_pred, labels=[0, 1]).ravel()
-    sens = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-    spec = tn / (tn + fp) if (tn + fp) > 0 else 0.0
-    return sens, spec
+def plot_proba_histograms(y_proba: np.ndarray, y_true: np.ndarray, title: str, bins: int = 50, threshold: float | None = None):
+    """
+    Overlaid histograms of predicted probabilities split by true label.
+    """
+    y_true = y_true.astype(int).ravel()
+
+    p0 = y_proba[y_true == 0]
+    p1 = y_proba[y_true == 1]
+
+    # two colors by default matplotlib cycle; no manual color setting needed
+    plt.hist(p0, bins=bins, alpha=0.6, label=f"y=0 (n={len(p0)})")
+    plt.hist(p1, bins=bins, alpha=0.6, label=f"y=1 (n={len(p1)})")
+
+    if threshold is not None:
+        plt.axvline(threshold, linestyle="--", linewidth=2, label=f"thr={threshold:.2f}")
+
+    plt.xlim(0, 1)
+    plt.xlabel("Predicted probability P(y=1)")
+    plt.ylabel("Count")
+    plt.title(title)
+    plt.grid(True)
+    plt.legend()
+
+
+def describe_proba(y_proba: np.ndarray, y_true: np.ndarray, name: str):
+    """
+    Quick numeric sanity checks for skew/collapse by class.
+    """
+    y_true = y_true.astype(int).ravel()
+    p0 = y_proba[y_true == 0]
+    p1 = y_proba[y_true == 1]
+
+    def stats(a: np.ndarray):
+        if a.size == 0:
+            return {"n": 0}
+        return {
+            "n": int(a.size),
+            "min": float(np.min(a)),
+            "p10": float(np.quantile(a, 0.10)),
+            "p50": float(np.median(a)),
+            "p90": float(np.quantile(a, 0.90)),
+            "max": float(np.max(a)),
+            "mean": float(np.mean(a)),
+        }
+
+    s0 = stats(p0)
+    s1 = stats(p1)
+    print(f"\n[{name}] proba stats by true class")
+    print("  y=0:", s0)
+    print("  y=1:", s1)
 
 
 # -------------------------------------------------
-# Main LOPO pipeline
+# Main: train on everyone except P20, plot proba histograms
 # -------------------------------------------------
 
 def main():
     in_dir = Path("../data/features_cache_basic")
     files = sorted(in_dir.glob("*_features.npz"))
     if not files:
-        raise RuntimeError("No *_features.npz files found")
+        raise RuntimeError(f"No *_features.npz files found in {in_dir}")
 
     # group files by patient (Pxx)
     patient_files: dict[str, list[Path]] = {}
@@ -64,152 +101,94 @@ def main():
     print(f"Found {len(files)} files, {len(patients)} patients:")
     print(patients)
 
-    results = []
+    test_pid = "P20"
+    if test_pid not in patients:
+        raise RuntimeError(f"{test_pid} not found in dataset patients: {patients}")
 
     # -------------------------------------------------
-    # Leave-One-Patient-Out
+    # Build train/test splits:
+    # - Train: all patients except P20 (annotated/balanced windows)
+    # - Test:  P20 annotated/balanced windows (NOT full EEG sliding windows)
     # -------------------------------------------------
-    threshold_values = np.linspace(0.0, 1.0, 101)
-    all_f1_curves = []  # will store one f1-curve per patient (len = n_thresholds)
-    for test_pid in patients:
-        print(f"\n[LOPO] Test patient = {test_pid}")
+    x_train_list, y_train_list = [], []
+    x_test_list, y_test_list = [], []
 
-        x_train_list, y_train_list = [], []
-        x_test_list, y_test_list = [], []
+    for pid, flist in patient_files.items():
+        for f in flist:
+            x, y = load_features(f)
+            if pid == test_pid:
+                x_test_list.append(x)
+                y_test_list.append(y)
+            else:
+                x_train_list.append(x)
+                y_train_list.append(y)
 
-        for pid, flist in patient_files.items():
-            for f in flist:
-                x, y = load_features(f)
-                if pid == test_pid:
-                    x_test_list.append(x)
-                    y_test_list.append(y)
-                else:
-                    x_train_list.append(x)
-                    y_train_list.append(y)
+    if not x_train_list or not x_test_list:
+        raise RuntimeError("Empty train or test split. Check your files/patient grouping.")
 
-        x_train = np.concatenate(x_train_list, axis=0)
-        y_train = np.concatenate(y_train_list, axis=0)
-        x_test = np.concatenate(x_test_list, axis=0)
-        y_test = np.concatenate(y_test_list, axis=0)
+    x_train = np.concatenate(x_train_list, axis=0)
+    y_train = np.concatenate(y_train_list, axis=0)
+    x_test = np.concatenate(x_test_list, axis=0)
+    y_test = np.concatenate(y_test_list, axis=0)
 
-        print(
-            f"  Train windows: {len(y_train)} (pos={int(y_train.sum())}) | "
-            f"Test windows: {len(y_test)} (pos={int(y_test.sum())})"
-        )
-
-        # handle class imbalance
-        pos = int(y_train.sum())
-        neg = int((y_train == 0).sum())
-        scale_pos_weight = (neg / pos) if pos > 0 else 1.0
-
-        model = XGBClassifier(
-            n_estimators=400,
-            learning_rate=0.05,
-            max_depth=4,
-            subsample=0.8,
-            colsample_bytree=0.8,
-            objective="binary:logistic",
-            eval_metric="logloss",
-            tree_method="hist",
-            n_jobs=-1,
-            scale_pos_weight=scale_pos_weight,
-        )
-
-        model.fit(x_train, y_train)
-
-        # inference
-        # inference
-        y_proba = model.predict_proba(x_test)[:, 1]
-
-        f1_curve = []  # F1 for this patient across thresholds
-
-        # (optional) AUCs do not depend on threshold, compute once
-        if len(np.unique(y_test)) == 2:
-            roc = roc_auc_score(y_test, y_proba)
-            pr = average_precision_score(y_test, y_proba)
-        else:
-            roc = np.nan
-            pr = np.nan
-
-        for thres in threshold_values:
-            y_pred = (y_proba >= thres).astype(np.uint8)
-
-            acc = accuracy_score(y_test, y_pred)
-            bacc = balanced_accuracy_score(y_test, y_pred)
-            f1 = f1_score(y_test, y_pred, zero_division=0)
-            sens, spec = sensitivity_specificity(y_test, y_pred)
-
-            f1_curve.append(f1)
-
-            # store per (patient, threshold) if you want (recommended)
-            results.append(
-                dict(
-                    patient=test_pid,
-                    threshold=float(thres),
-                    n_train=len(y_train),
-                    n_test=len(y_test),
-                    pos_train=int(y_train.sum()),
-                    pos_test=int(y_test.sum()),
-                    acc=acc,
-                    bacc=bacc,
-                    f1=f1,
-                    sens=sens,
-                    spec=spec,
-                    roc_auc=roc,
-                    pr_auc=pr,
-                )
-            )
-
-        all_f1_curves.append(np.array(f1_curve, dtype=float))
-
-        # optional: print best threshold for this patient
-        best_i = int(np.argmax(all_f1_curves[-1]))
-        print(
-            f"  best F1={all_f1_curves[-1][best_i]:.3f} at thr={threshold_values[best_i]:.2f} | ROC-AUC={roc if not np.isnan(roc) else 'NA'}")
-
-    # -------------------------------------------------
-    # Summary
-    # -------------------------------------------------
-    # print("\n=== LOPO summary (mean ± std) ===")
-
-    def mean_std(key):
-        vals = np.array([r[key] for r in results], dtype=float)
-        vals = vals[~np.isnan(vals)]
-        return vals.mean(), vals.std()
-
-    for k in ["acc", "bacc", "f1", "sens", "spec", "roc_auc", "pr_auc"]:
-        m, s = mean_std(k)
-        # print(f"{k:7s}: {m:.4f} ± {s:.4f}")
-
-    out = Path("../data/lopo_xgb_results.npy")
-    # np.save(out, results, allow_pickle=True)
-    # print(f"\nSaved per-patient results to {out}")
-
-    f1_matrix = np.stack(all_f1_curves, axis=0)  # shape: (n_patients, n_thresholds)
-    mean_f1 = f1_matrix.mean(axis=0)
-    std_f1 = f1_matrix.std(axis=0)
-
-    best_i = int(np.argmax(mean_f1))
     print(
-        f"\nBest mean-F1 threshold: thr={threshold_values[best_i]:.2f}  meanF1={mean_f1[best_i]:.4f} ± {std_f1[best_i]:.4f}")
-
-    #save results
-    out_curve = Path("../data/lopo_f1_curve.npz")
-    np.savez(
-        out_curve,
-        thresholds=threshold_values.astype(np.float32),
-        mean_f1=mean_f1.astype(np.float32),
-        std_f1=std_f1.astype(np.float32),
+        f"\nSplit summary:\n"
+        f"  Train (all except {test_pid}): n={len(y_train)} pos={int(y_train.sum())} neg={int((y_train==0).sum())}\n"
+        f"  Test  ({test_pid}): n={len(y_test)} pos={int(y_test.sum())} neg={int((y_test==0).sum())}"
     )
-    print(f"Saved F1 curve to {out_curve}")
 
-    # plot
-    plt.figure()
-    plt.plot(threshold_values, mean_f1)
-    plt.xlabel("Threshold")
-    plt.ylabel("Mean F1 (across patients)")
-    plt.title("LOPO: Mean F1 vs Threshold")
-    plt.grid(True)
+    # handle class imbalance (in case it's not perfectly balanced)
+    pos = int(y_train.sum())
+    neg = int((y_train == 0).sum())
+    scale_pos_weight = (neg / pos) if pos > 0 else 1.0
+
+    model = XGBClassifier(
+        n_estimators=400,
+        learning_rate=0.05,
+        max_depth=4,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        objective="binary:logistic",
+        eval_metric="logloss",
+        tree_method="hist",
+        n_jobs=-1,
+        scale_pos_weight=scale_pos_weight,
+    )
+
+    model.fit(x_train, y_train)
+
+    # probabilities for (a) train and (b) test (P20)
+    y_proba_train = model.predict_proba(x_train)[:, 1]
+    y_proba_test = model.predict_proba(x_test)[:, 1]
+
+    # quick numeric sanity checks
+    describe_proba(y_proba_train, y_train, name="TRAIN")
+    describe_proba(y_proba_test, y_test, name=f"TEST ({test_pid})")
+
+    # -------------------------------------------------
+    # Plots: separate histograms by true label
+    # -------------------------------------------------
+    threshold_for_line = 0.5  # optional reference line; set to None to disable
+
+    plt.figure(figsize=(12, 4))
+
+    plt.subplot(1, 2, 1)
+    plot_proba_histograms(
+        y_proba_train, y_train,
+        title=f"Train (all except {test_pid}): probas by true label",
+        bins=50,
+        threshold=threshold_for_line,
+    )
+
+    plt.subplot(1, 2, 2)
+    plot_proba_histograms(
+        y_proba_test, y_test,
+        title=f"Test ({test_pid}): probas by true label",
+        bins=50,
+        threshold=threshold_for_line,
+    )
+
+    plt.tight_layout()
     plt.show()
 
 
