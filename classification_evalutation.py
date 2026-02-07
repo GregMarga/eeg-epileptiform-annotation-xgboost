@@ -147,7 +147,7 @@ def main():
         learning_rate=0.05,
         max_depth=4,
         subsample=0.8,
-        colsample_bytree=0.8,
+        colsample_bytree=1.0,
         objective="binary:logistic",
         eval_metric="logloss",
         tree_method="hist",
@@ -174,7 +174,8 @@ def main():
 
     plt.subplot(1, 2, 1)
     plot_proba_histograms(
-        y_proba_train, y_train,
+        y_proba_train,
+        y_train,
         title=f"Train (all except {test_pid}): probas by true label",
         bins=50,
         threshold=threshold_for_line,
@@ -182,7 +183,8 @@ def main():
 
     plt.subplot(1, 2, 2)
     plot_proba_histograms(
-        y_proba_test, y_test,
+        y_proba_test,
+        y_test,
         title=f"Test ({test_pid}): probas by true label",
         bins=50,
         threshold=threshold_for_line,
