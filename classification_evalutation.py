@@ -4,6 +4,7 @@ from pathlib import Path
 import numpy as np
 import mne
 import matplotlib.pyplot as plt
+import csv
 
 from xgboost import XGBClassifier
 from sklearn.metrics import (
@@ -47,6 +48,14 @@ def sensitivity_specificity(y_true, y_pred):
     sens = tp / (tp + fn) if (tp + fn) > 0 else 0.0
     spec = tn / (tn + fp) if (tn + fp) > 0 else 0.0
     return sens, spec
+
+def sec_to_hmsms(sec: float) -> str:
+    # format seconds -> HH:MM:SS.mmm (for easy human reading)
+    ms = int(round(sec * 1000))
+    s, ms = divmod(ms, 1000)
+    m, s = divmod(s, 60)
+    h, m = divmod(m, 60)
+    return f"{h:02d}:{m:02d}:{s:02d}.{ms:03d}"
 
 
 # -------------------------------------------------
@@ -170,6 +179,39 @@ def main():
     plt.title("Hit Ratio vs Threshold")
     plt.grid(True)
     plt.show()
+
+    sfreq = float(raw.info["sfreq"])
+
+    csv_out = Path("../data/P20_window_timestamps_and_proba.csv")
+
+    with csv_out.open("w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow([
+            "window_index",
+            "start_sec", "end_sec", "center_sec",
+            "start_hmsms", "end_hmsms", "center_hmsms",
+            "start_sample", "end_sample", "center_sample",
+            "proba_y_eq_1",
+        ])
+
+        for i, p in enumerate(y_proba):
+            start_sec = i * hop_sec
+            end_sec = start_sec + win_sec
+            center_sec = start_sec + 0.5 * win_sec
+
+            start_sample = int(round(start_sec * sfreq))
+            end_sample = int(round(end_sec * sfreq))
+            center_sample = int(round(center_sec * sfreq))
+
+            w.writerow([
+                i,
+                f"{start_sec:.6f}", f"{end_sec:.6f}", f"{center_sec:.6f}",
+                sec_to_hmsms(start_sec), sec_to_hmsms(end_sec), sec_to_hmsms(center_sec),
+                start_sample, end_sample, center_sample,
+                f"{float(p):.8f}",
+            ])
+
+    print(f"Saved window timestamps + probabilities to: {csv_out.resolve()}")
 
         # sfreq = 256
         # step = 0.25  # in sec
