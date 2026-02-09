@@ -73,13 +73,19 @@ def create_annotation_centered_epochs(
         window=250  # in ms
 ):
     annotation_onsets = np.round(annotations.onset * sfreq).astype(int)
-    descriptions = np.array(annotations.description)
+    onsets_sec = np.array(annotations.onset, dtype=float)
+    descriptions = np.array(annotations.description, dtype=object)
 
     labels = []
     epochs = []
 
+    kept_ann_idx = []
+    kept_onset_sec = []
+    kept_desc = []
+
     margin = int(sfreq * window / 1000)
     n_samples = data.shape[1]
+
     for i in range(len(annotations)):
         epoch_center_idx = int(annotation_onsets[i])
         start = epoch_center_idx - margin
@@ -89,15 +95,26 @@ def create_annotation_centered_epochs(
             continue
 
         if descriptions[i] == positive_label:
-            labels.append(1)
-            epoch = data[:, start:stop]
-            epochs.append(epoch)
+            lab = 1
         elif descriptions[i] == negative_label:
-            labels.append(0)
-            epoch = data[:, start:stop]
-            epochs.append(epoch)
+            lab = 0
+        else:
+            continue  # ignore other labels
 
-    return np.array(epochs), np.array(labels)
+        epochs.append(data[:, start:stop])
+        labels.append(lab)
+
+        kept_ann_idx.append(i)
+        kept_onset_sec.append(onsets_sec[i])
+        kept_desc.append(descriptions[i])
+
+    return (
+        np.array(epochs, dtype=np.float32),
+        np.array(labels, dtype=np.uint8),
+        np.array(kept_ann_idx, dtype=np.int32),
+        np.array(kept_onset_sec, dtype=np.float64),
+        np.array(kept_desc, dtype=object),
+    )
 
 
 def preprocess_edf_to_windows(
@@ -144,16 +161,25 @@ def preprocess_edf_to_windows(
     sfreq = float(raw.info['sfreq'])
     annotations=raw.annotations
 
-    epochs,labels=create_annotation_centered_epochs(data=data,sfreq=sfreq,annotations=annotations,positive_label=positive_label,negative_label=negative_label)
+    epochs, labels, kept_ann_idx, kept_onset_sec, kept_desc = create_annotation_centered_epochs(
+        data=data,
+        sfreq=sfreq,
+        annotations=annotations,
+        positive_label=positive_label,
+        negative_label=negative_label,
+    )
 
     ch_names = np.array(raw.ch_names, dtype=object)
 
     return (
-        epochs.astype(np.float32),
-        labels.astype(np.uint8),
+        epochs,
+        labels,
         sfreq,
         ch_names,
         np.array(bad_chs, dtype=object),
+        kept_ann_idx,
+        kept_onset_sec,
+        kept_desc,
     )
 
 ## check

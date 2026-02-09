@@ -11,7 +11,7 @@ def patient_id_from_filename(filename: str):
 
 
 def main():
-    data_dir = Path("../../data")
+    data_dir = Path("../data")
     out_dir = data_dir / "windows_cache"
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -31,7 +31,7 @@ def main():
     for i, edf_path in enumerate(selected, start=1):
         print(f"[{i}/{len(selected)}] {edf_path.name}")
 
-        windows, labels, sfreq, ch_names, bad_chs = preprocessing.preprocess_edf_to_windows(
+        windows, labels, sfreq, ch_names, bad_chs, kept_ann_idx, kept_onset_sec, kept_desc = preprocessing.preprocess_edf_to_windows(
             edf_path=str(edf_path),
             l_freq=0.5,
             h_freq=40.0,
@@ -50,6 +50,9 @@ def main():
             ch_names=ch_names,
             bad_chs=bad_chs,
             edf_name=edf_path.name,
+            kept_ann_idx=kept_ann_idx,
+            kept_onset_sec=kept_onset_sec,
+            kept_desc=kept_desc,
         )
 
         print(f"  Saved: {out_path} | windows={windows.shape} positives={int(labels.sum())}/{len(labels)}")

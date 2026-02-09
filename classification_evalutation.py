@@ -49,6 +49,26 @@ def plot_proba_histograms(y_proba: np.ndarray, y_true: np.ndarray, title: str, b
     plt.grid(True)
     plt.legend()
 
+def find_low_false_neg(y_proba: np.ndarray, y_true: np.ndarray):
+    y_true = y_true.astype(int).ravel()
+    pos_idx=np.where(y_true==1)[0]
+    p1 = y_proba[pos_idx]
+    lowest_idx=np.argsort(p1)
+    return  pos_idx[lowest_idx[:10]], y_proba[pos_idx[lowest_idx[:10]]]
+
+def sec_to_hms(sec: float) -> str:
+    h = int(sec // 3600)
+    m = int((sec % 3600) // 60)
+    s = sec % 60
+    return f"{h:02d}:{m:02d}:{s:06.3f}"
+
+def locate_test_sample(test_sources, global_idx: int):
+    offset = 0
+    for feat_path, n in test_sources:
+        if global_idx < offset + n:
+            return feat_path, global_idx - offset
+        offset += n
+    raise IndexError("global_idx out of range")
 
 def describe_proba(y_proba: np.ndarray, y_true: np.ndarray, name: str):
     """
@@ -112,6 +132,7 @@ def main():
     # -------------------------------------------------
     x_train_list, y_train_list = [], []
     x_test_list, y_test_list = [], []
+    test_sources = []
 
     for pid, flist in patient_files.items():
         for f in flist:
@@ -119,6 +140,7 @@ def main():
             if pid == test_pid:
                 x_test_list.append(x)
                 y_test_list.append(y)
+                test_sources.append((f, len(y)))  # <-- ΚΡΙΣΙΜΟ
             else:
                 x_train_list.append(x)
                 y_train_list.append(y)
@@ -189,9 +211,30 @@ def main():
         bins=50,
         threshold=threshold_for_line,
     )
+    idx, probs = find_low_false_neg(y_proba_test, y_test)
+
+    print("\nLowest-probability FALSE NEGATIVES (P20):")
+    for gi, p in zip(idx, probs):
+        feat_path, local_idx = locate_test_sample(test_sources, int(gi))
+
+        z = np.load(feat_path, allow_pickle=True)
+
+        desc = str(z["kept_desc"][local_idx])
+        onset = float(z["kept_onset_sec"][local_idx])
+        ann_i = int(z["kept_ann_idx"][local_idx])
+
+        print(
+            f"global={gi:4d}  local={local_idx:3d}  "
+            f"proba={p:.6f}  "
+            f"desc={desc}  "
+            f"time={sec_to_hms(onset)}  "
+            f"(onset_sec={onset:.3f})  "
+            f"ann_idx_in_raw={ann_i}  "
+            f"file={feat_path.name}"
+        )
 
     plt.tight_layout()
-    plt.show()
+    # plt.show()
 
 
 if __name__ == "__main__":

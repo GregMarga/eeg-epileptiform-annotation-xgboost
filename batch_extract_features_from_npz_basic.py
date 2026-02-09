@@ -70,11 +70,16 @@ def feature_names(ch_names: np.ndarray) -> list[str]:
 def process_npz_file(npz_path: Path, out_dir: Path, batch_windows: int = 512):
     z = np.load(npz_path, allow_pickle=True)
 
-    windows = z["windows"]              # (n_windows, n_channels, win_len)
+    windows = z["windows"]
     labels = z["labels"]
     sfreq = float(z["sfreq"])
     ch_names = z["ch_names"]
     edf_name = z.get("edf_name", npz_path.name)
+
+    # NEW: carry annotation-mapping metadata forward (if present)
+    kept_ann_idx = z.get("kept_ann_idx", None)
+    kept_onset_sec = z.get("kept_onset_sec", None)
+    kept_desc = z.get("kept_desc", None)
 
     n_windows, n_ch, _ = windows.shape
     fnames = feature_names(ch_names)
@@ -91,8 +96,7 @@ def process_npz_file(npz_path: Path, out_dir: Path, batch_windows: int = 512):
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / npz_path.name.replace("_windows.npz", "_features.npz")
 
-    np.savez_compressed(
-        out_path,
+    save_kwargs = dict(
         X=X,
         y=labels.astype(np.uint8),
         sfreq=sfreq,
@@ -100,16 +104,26 @@ def process_npz_file(npz_path: Path, out_dir: Path, batch_windows: int = 512):
         feature_names=np.array(fnames, dtype=object),
         source_npz=npz_path.name,
         source_edf=str(edf_name),
+        # optional but handy:
+        row_idx=np.arange(n_windows, dtype=np.int32),  # explicit "local index"
     )
 
-    print(
-        f"Saved: {out_path} | X={X.shape} positives={int(labels.sum())}/{len(labels)}"
-    )
+    # only save if they exist in windows npz
+    if kept_ann_idx is not None:
+        save_kwargs["kept_ann_idx"] = kept_ann_idx
+    if kept_onset_sec is not None:
+        save_kwargs["kept_onset_sec"] = kept_onset_sec
+    if kept_desc is not None:
+        save_kwargs["kept_desc"] = kept_desc
+
+    np.savez_compressed(out_path, **save_kwargs)
+
+    print(f"Saved: {out_path} | X={X.shape} positives={int(labels.sum())}/{len(labels)}")
 
 
 def main():
-    in_dir = Path("../../data/windows_cache")
-    out_dir = Path("../../data/features_cache_basic")
+    in_dir = Path("../data/windows_cache")
+    out_dir = Path("../data/features_cache_basic")
 
     npz_files = sorted(in_dir.glob("*_windows.npz"))
     if not npz_files:
