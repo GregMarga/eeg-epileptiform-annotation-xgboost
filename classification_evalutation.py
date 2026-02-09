@@ -1,10 +1,18 @@
 import re
 from pathlib import Path
 import numpy as np
-import matplotlib.pyplot as plt
 
 from xgboost import XGBClassifier
-
+from sklearn.metrics import (
+    accuracy_score,
+    balanced_accuracy_score,
+    f1_score,
+    precision_score,
+    recall_score,
+    roc_auc_score,
+    average_precision_score,
+    confusion_matrix,
+)
 
 # -------------------------------------------------
 # Helpers
@@ -26,69 +34,11 @@ def load_features(npz_path: Path):
     return X, y
 
 
-def plot_proba_histograms(y_proba: np.ndarray, y_true: np.ndarray, title: str, bins: int = 50, threshold: float | None = None):
-    """
-    Overlaid histograms of predicted probabilities split by true label.
-    """
-    y_true = y_true.astype(int).ravel()
-
-    p0 = y_proba[y_true == 0]
-    p1 = y_proba[y_true == 1]
-
-    # two colors by default matplotlib cycle; no manual color setting needed
-    plt.hist(p0, bins=bins, alpha=0.6, label=f"y=0 (n={len(p0)})")
-    plt.hist(p1, bins=bins, alpha=0.6, label=f"y=1 (n={len(p1)})")
-
-    if threshold is not None:
-        plt.axvline(threshold, linestyle="--", linewidth=2, label=f"thr={threshold:.2f}")
-
-    plt.xlim(0, 1)
-    plt.xlabel("Predicted probability P(y=1)")
-    plt.ylabel("Count")
-    plt.title(title)
-    plt.grid(True)
-    plt.legend()
-
-
-def describe_proba(y_proba: np.ndarray, y_true: np.ndarray, name: str):
-    """
-    Quick numeric sanity checks for skew/collapse by class.
-    """
-    y_true = y_true.astype(int).ravel()
-    p0 = y_proba[y_true == 0]
-    p1 = y_proba[y_true == 1]
-
-    def stats(a: np.ndarray):
-        if a.size == 0:
-            return {"n": 0}
-        return {
-            "n": int(a.size),
-            "min": float(np.min(a)),
-            "p10": float(np.quantile(a, 0.10)),
-            "p50": float(np.median(a)),
-            "p90": float(np.quantile(a, 0.90)),
-            "max": float(np.max(a)),
-            "mean": float(np.mean(a)),
-        }
-
-    s0 = stats(p0)
-    s1 = stats(p1)
-    print(f"\n[{name}] proba stats by true class")
-    print("  y=0:", s0)
-    print("  y=1:", s1)
-
-
-# -------------------------------------------------
-# Main: train on everyone except P20, plot proba histograms
-# -------------------------------------------------
-
-def main():
-    in_dir = Path("../data/features_cache_basic")
+def build_patient_index(in_dir: Path) -> dict[str, list[Path]]:
     files = sorted(in_dir.glob("*_features.npz"))
     if not files:
         raise RuntimeError(f"No *_features.npz files found in {in_dir}")
 
-    # group files by patient (Pxx)
     patient_files: dict[str, list[Path]] = {}
     for f in files:
         pid = patient_from_filename(f.name)
@@ -97,47 +47,22 @@ def main():
             continue
         patient_files.setdefault(pid, []).append(f)
 
-    patients = sorted(patient_files.keys())
-    print(f"Found {len(files)} files, {len(patients)} patients:")
-    print(patients)
+    if not patient_files:
+        raise RuntimeError("No patient files parsed. Check filename pattern.")
+    return patient_files
 
-    test_pid = "P20"
-    if test_pid not in patients:
-        raise RuntimeError(f"{test_pid} not found in dataset patients: {patients}")
 
-    # -------------------------------------------------
-    # Build train/test splits:
-    # - Train: all patients except P20 (annotated/balanced windows)
-    # - Test:  P20 annotated/balanced windows (NOT full EEG sliding windows)
-    # -------------------------------------------------
-    x_train_list, y_train_list = [], []
-    x_test_list, y_test_list = [], []
+def concat_patient_files(file_list: list[Path]) -> tuple[np.ndarray, np.ndarray]:
+    xs, ys = [], []
+    for f in file_list:
+        x, y = load_features(f)
+        xs.append(x)
+        ys.append(y)
+    return np.concatenate(xs, axis=0), np.concatenate(ys, axis=0)
 
-    for pid, flist in patient_files.items():
-        for f in flist:
-            x, y = load_features(f)
-            if pid == test_pid:
-                x_test_list.append(x)
-                y_test_list.append(y)
-            else:
-                x_train_list.append(x)
-                y_train_list.append(y)
 
-    if not x_train_list or not x_test_list:
-        raise RuntimeError("Empty train or test split. Check your files/patient grouping.")
-
-    x_train = np.concatenate(x_train_list, axis=0)
-    y_train = np.concatenate(y_train_list, axis=0)
-    x_test = np.concatenate(x_test_list, axis=0)
-    y_test = np.concatenate(y_test_list, axis=0)
-
-    print(
-        f"\nSplit summary:\n"
-        f"  Train (all except {test_pid}): n={len(y_train)} pos={int(y_train.sum())} neg={int((y_train==0).sum())}\n"
-        f"  Test  ({test_pid}): n={len(y_test)} pos={int(y_test.sum())} neg={int((y_test==0).sum())}"
-    )
-
-    # handle class imbalance (in case it's not perfectly balanced)
+def train_xgb(x_train: np.ndarray, y_train: np.ndarray) -> XGBClassifier:
+    # handle class imbalance (in case train split is not perfectly balanced)
     pos = int(y_train.sum())
     neg = int((y_train == 0).sum())
     scale_pos_weight = (neg / pos) if pos > 0 else 1.0
@@ -153,45 +78,133 @@ def main():
         tree_method="hist",
         n_jobs=-1,
         scale_pos_weight=scale_pos_weight,
+        random_state=42,
     )
-
     model.fit(x_train, y_train)
+    return model
 
-    # probabilities for (a) train and (b) test (P20)
-    y_proba_train = model.predict_proba(x_train)[:, 1]
-    y_proba_test = model.predict_proba(x_test)[:, 1]
 
-    # quick numeric sanity checks
-    describe_proba(y_proba_train, y_train, name="TRAIN")
-    describe_proba(y_proba_test, y_test, name=f"TEST ({test_pid})")
+def safe_roc_auc(y_true: np.ndarray, y_proba: np.ndarray) -> float:
+    # roc_auc needs both classes present
+    if len(np.unique(y_true)) < 2:
+        return float("nan")
+    return float(roc_auc_score(y_true, y_proba))
 
-    # -------------------------------------------------
-    # Plots: separate histograms by true label
-    # -------------------------------------------------
-    threshold_for_line = 0.5  # optional reference line; set to None to disable
 
-    plt.figure(figsize=(12, 4))
+def safe_pr_auc(y_true: np.ndarray, y_proba: np.ndarray) -> float:
+    # average_precision also benefits from both classes; if only one class, it's degenerate
+    if len(np.unique(y_true)) < 2:
+        return float("nan")
+    return float(average_precision_score(y_true, y_proba))
 
-    plt.subplot(1, 2, 1)
-    plot_proba_histograms(
-        y_proba_train,
-        y_train,
-        title=f"Train (all except {test_pid}): probas by true label",
-        bins=50,
-        threshold=threshold_for_line,
-    )
 
-    plt.subplot(1, 2, 2)
-    plot_proba_histograms(
-        y_proba_test,
-        y_test,
-        title=f"Test ({test_pid}): probas by true label",
-        bins=50,
-        threshold=threshold_for_line,
-    )
+def evaluate_fold(y_true: np.ndarray, y_proba: np.ndarray, thr: float = 0.5) -> dict[str, float]:
+    y_pred = (y_proba >= thr).astype(np.uint8)
 
-    plt.tight_layout()
-    plt.show()
+    acc = float(accuracy_score(y_true, y_pred))
+    bacc = float(balanced_accuracy_score(y_true, y_pred))
+    f1 = float(f1_score(y_true, y_pred, zero_division=0))
+    prec = float(precision_score(y_true, y_pred, zero_division=0))
+    rec = float(recall_score(y_true, y_pred, zero_division=0))
+    ra = safe_roc_auc(y_true, y_proba)
+    pa = safe_pr_auc(y_true, y_proba)
+
+    tn, fp, fn, tp = confusion_matrix(y_true, y_pred, labels=[0, 1]).ravel()
+
+    return {
+        "acc": acc,
+        "bacc": bacc,
+        "f1": f1,
+        "precision": prec,
+        "recall": rec,
+        "roc_auc": ra,
+        "pr_auc": pa,
+        "tp": float(tp),
+        "fp": float(fp),
+        "tn": float(tn),
+        "fn": float(fn),
+    }
+
+
+def summarize_metric(values: list[float]) -> tuple[float, float]:
+    a = np.array(values, dtype=float)
+    return float(np.nanmean(a)), float(np.nanstd(a))
+
+
+# -------------------------------------------------
+# LOPO CV
+# -------------------------------------------------
+
+def main():
+    in_dir = Path("../data/features_cache_basic")
+    patient_files = build_patient_index(in_dir)
+    patients = sorted(patient_files.keys())
+
+    print(f"Patients: {patients} (n={len(patients)})")
+
+    thr = 0.5  # fixed threshold for classification metrics
+
+    fold_metrics: dict[str, dict[str, float]] = {}
+    # store arrays for summary
+    keys = ["acc", "bacc", "f1", "precision", "recall", "roc_auc", "pr_auc"]
+    collected = {k: [] for k in keys}
+
+    # aggregate confusion counts across folds
+    agg = {"tp": 0.0, "fp": 0.0, "tn": 0.0, "fn": 0.0}
+
+    for test_pid in patients:
+        # build train set from all other patients
+        train_pids = [p for p in patients if p != test_pid]
+
+        x_train_list, y_train_list = [], []
+        for pid in train_pids:
+            x, y = concat_patient_files(patient_files[pid])
+            x_train_list.append(x)
+            y_train_list.append(y)
+
+        x_train = np.concatenate(x_train_list, axis=0)
+        y_train = np.concatenate(y_train_list, axis=0)
+
+        # test set is that patient's files
+        x_test, y_test = concat_patient_files(patient_files[test_pid])
+
+        # train model
+        model = train_xgb(x_train, y_train)
+
+        # predict
+        y_proba = model.predict_proba(x_test)[:, 1]
+
+        # metrics
+        m = evaluate_fold(y_test, y_proba, thr=thr)
+        fold_metrics[test_pid] = m
+
+        for k in keys:
+            collected[k].append(m[k])
+
+        for c in ["tp", "fp", "tn", "fn"]:
+            agg[c] += m[c]
+
+        print(
+            f"[{test_pid}] "
+            f"n={len(y_test)} pos={int(y_test.sum())} "
+            f"acc={m['acc']:.3f} bacc={m['bacc']:.3f} f1={m['f1']:.3f} "
+            f"prec={m['precision']:.3f} rec={m['recall']:.3f} "
+            f"roc_auc={m['roc_auc']:.3f} pr_auc={m['pr_auc']:.3f}"
+        )
+
+    print("\n=== LOPO summary (mean ± std across patients) ===")
+    for k in keys:
+        mean, std = summarize_metric(collected[k])
+        print(f"{k:>10}: {mean:.4f} ± {std:.4f}")
+
+    print("\n=== Aggregate confusion (sum across folds, at thr=0.5) ===")
+    print(f"TP={int(agg['tp'])}  FP={int(agg['fp'])}  TN={int(agg['tn'])}  FN={int(agg['fn'])}")
+
+    # Optional: identify worst patients by F1
+    worst = sorted(fold_metrics.items(), key=lambda kv: kv[1]["f1"])[:5]
+    print("\nWorst by F1:")
+    for pid, m in worst:
+        print(f"  {pid}: f1={m['f1']:.3f} (prec={m['precision']:.3f}, rec={m['recall']:.3f})")
 
 
 if __name__ == "__main__":
