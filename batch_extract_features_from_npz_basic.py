@@ -247,7 +247,7 @@ def main():
 
     for i, p in enumerate(npz_files, start=1):
         print(f"\n[{i}/{len(npz_files)}] Processing {p.name}")
-        process_npz_file(p, out_dir, batch_windows=512)
+        process_npz_file(p, out_dir, batch_windows=512 )
 
     print("\nDone.")
 
