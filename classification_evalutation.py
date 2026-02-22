@@ -57,20 +57,81 @@ def sec_to_hmsms(sec: float) -> str:
     h, m = divmod(m, 60)
     return f"{h:02d}:{m:02d}:{s:02d}.{ms:03d}"
 
+def pd_intervals_from_mne_annotations(ann) -> np.ndarray:
+    """
+    Returns array of shape (K,2): [[start_sec, stop_sec], ...]
+    Assumes PD_START/PD_STOP are ordered in time.
+    Ignores '*' and '-' or any other labels.
+    """
+    events = sorted(zip(ann.onset, ann.description), key=lambda x: x[0])
+
+    intervals = []
+    current_start = None
+
+    for t, desc in events:
+        desc = desc.strip().upper()
+        if desc == "PD_START":
+            current_start = t
+        elif desc == "PD_STOP":
+            if current_start is not None and t > current_start:
+                intervals.append((float(current_start), float(t)))
+            current_start = None
+
+    return np.array(intervals, dtype=float)
+
+def label_windows_by_overlap(
+    n_windows: int,
+    win_sec: float,
+    hop_sec: float,
+    intervals: np.ndarray,
+    *,
+    min_overlap_sec: float = 0.0
+) -> np.ndarray:
+    """
+    intervals: array (K,2) with [start, stop] in seconds.
+    Returns y_true (n_windows,) uint8
+    """
+    starts = np.arange(n_windows, dtype=float) * hop_sec
+    ends = starts + win_sec
+
+    y = np.zeros(n_windows, dtype=np.uint8)
+    if intervals.size == 0:
+        return y
+
+    for k in range(intervals.shape[0]):
+        a, b = intervals[k]
+        # overlap length for all windows with this interval
+        overlap = np.minimum(ends, b) - np.maximum(starts, a)
+        y |= (overlap > min_overlap_sec).astype(np.uint8)
+
+    return y
+
+def compute_metrics(y_true, y_proba, threshold=0.5):
+    y_pred = (y_proba >= threshold).astype(np.uint8)
+    out = {
+        "acc": accuracy_score(y_true, y_pred),
+        "bal_acc": balanced_accuracy_score(y_true, y_pred),
+        "f1": f1_score(y_true, y_pred, zero_division=0),
+        "roc_auc": roc_auc_score(y_true, y_proba) if len(np.unique(y_true)) == 2 else np.nan,
+        "pr_auc": average_precision_score(y_true, y_proba) if len(np.unique(y_true)) == 2 else np.nan,
+    }
+    return out
+
 
 # -------------------------------------------------
 # Main pipeline
 # -------------------------------------------------
 
 def main():
-    in_dir = Path("../data/features_cache_basic")
-    test_dir = Path("../test/features_cache_basic")
+    in_dir = Path("../../data/freq_time_features_cache_basic")
+    test_dir = Path("../testP70/features_cache_basic")
     files = sorted(in_dir.glob("*_features.npz"))
     if not files:
         raise RuntimeError("No *_features.npz files found")
 
     # group files by patient (Pxx)
-    raw = mne.io.read_raw_edf("../data/P20_GHB_00015_0000348.edf", preload=False, verbose="ERROR")
+    raw = mne.io.read_raw_edf("../../../data/P70_GHB_M1679_0000078.edf", preload=False, verbose="ERROR")
+    sfreq = float(raw.info["sfreq"])
     ann = raw.annotations
 
     pos_ann_onsets = np.array([on for on, desc in zip(ann.onset, ann.description) if "*" in desc], dtype=float)
@@ -99,12 +160,14 @@ def main():
     results = []
 
     # -------------------------------------------------
-    # Use all patients, except p20, for training and test on p20 full eeg segmented into sliding windows
+    # Use all patients, except p70, for training and test on p70 full eeg segmented into sliding windows
     # -------------------------------------------------
 
+    test_pid = "P70"
     x_train_list, y_train_list = [], []
-
     for pid, flist in patient_files.items():
+        if pid == test_pid:
+            continue
         for f in flist:
             x, y = load_features(f)
             x_train_list.append(x)
@@ -113,12 +176,12 @@ def main():
     x_train = np.concatenate(x_train_list, axis=0)
     y_train = np.concatenate(y_train_list, axis=0)
 
-    p20_file = test_dir / "P20_GHB_00015_0000348_full_features.npz"
+    p70_file = test_dir / "P70_GHB_M1679_0000078.npz"
 
-    if not p20_file.exists():
-        raise RuntimeError(f"File not found: {p20_file}")
+    if not p70_file.exists():
+        raise RuntimeError(f"File not found: {p70_file}")
 
-    x_test = load_features_X_only(p20_file)
+    x_test = load_features_X_only(p70_file)
 
     # handle class imbalance
     pos = int(y_train.sum())
@@ -143,6 +206,19 @@ def main():
     # inference
     threshold_values = np.linspace(0.0, 1.0, 101)
     y_proba = model.predict_proba(x_test)[:, 1]
+
+    intervals = pd_intervals_from_mne_annotations(raw.annotations)
+    y_true = label_windows_by_overlap(
+        n_windows=len(y_proba),
+        win_sec=win_sec,
+        hop_sec=hop_sec,
+        intervals=intervals,
+        min_overlap_sec=0.0
+    )
+
+    print("GT positives ratio:", float(y_true.mean()))
+    print(compute_metrics(y_true, y_proba, threshold=0.5))
+
     print("y_proba stats:",
           "min", float(y_proba.min()),
           "p50", float(np.median(y_proba)),
@@ -162,7 +238,7 @@ def main():
     thr_arr = np.array([t for t, r in threshold_hits], dtype=float)
     hits_arr = np.array([r for t, r in threshold_hits], dtype=float)
 
-    out_hit_ratio = Path("../data/p20_hit_ratio_curve.npz")
+    out_hit_ratio = Path(f"../../../data/{test_pid}_hit_ratio_curve.npz")
 
     np.savez(
         out_hit_ratio,
@@ -180,9 +256,7 @@ def main():
     plt.grid(True)
     plt.show()
 
-    sfreq = float(raw.info["sfreq"])
-
-    csv_out = Path("../data/P20_window_timestamps_and_proba.csv")
+    csv_out = Path(f"../../../data/{test_pid}_window_timestamps_and_proba.csv")
 
     with csv_out.open("w", newline="") as f:
         w = csv.writer(f)
