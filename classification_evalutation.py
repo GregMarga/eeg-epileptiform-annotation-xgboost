@@ -130,9 +130,10 @@ def main():
         raise RuntimeError("No *_features.npz files found")
 
     # group files by patient (Pxx)
-    raw = mne.io.read_raw_edf("../../../data/P70_GHB_M1679_0000078.edf", preload=False, verbose="ERROR")
+    raw = mne.io.read_raw_edf("../../../data/extra_data/P70_GHB_M1679_0000078.edf", preload=False, verbose="ERROR")
     sfreq = float(raw.info["sfreq"])
     ann = raw.annotations
+    print(ann)
 
     pos_ann_onsets = np.array([on for on, desc in zip(ann.onset, ann.description) if "*" in desc], dtype=float)
     pos_ann_onsets.sort()
@@ -141,13 +142,9 @@ def main():
     hop_sec=0.25
 
     patient_files: dict[str, list[Path]] = {}
-    skipped_first_p20 = False
+
     for f in files:
         pid = patient_from_filename(f.name)
-        if pid == "P20" and not skipped_first_p20:
-            print(f"Skipping first P20: {f.name}")
-            skipped_first_p20 = True
-            continue
         if pid is None:
             print(f"Skipping (no patient id): {f.name}")
             continue
@@ -176,7 +173,7 @@ def main():
     x_train = np.concatenate(x_train_list, axis=0)
     y_train = np.concatenate(y_train_list, axis=0)
 
-    p70_file = test_dir / "P70_GHB_M1679_0000078.npz"
+    p70_file = test_dir / "P70_GHB_M1679_0000078_full_features.npz"
 
     if not p70_file.exists():
         raise RuntimeError(f"File not found: {p70_file}")
