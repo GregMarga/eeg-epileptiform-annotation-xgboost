@@ -49,6 +49,7 @@ def sensitivity_specificity(y_true, y_pred):
     spec = tn / (tn + fp) if (tn + fp) > 0 else 0.0
     return sens, spec
 
+
 def sec_to_hmsms(sec: float) -> str:
     # format seconds -> HH:MM:SS.mmm (for easy human reading)
     ms = int(round(sec * 1000))
@@ -56,6 +57,7 @@ def sec_to_hmsms(sec: float) -> str:
     m, s = divmod(s, 60)
     h, m = divmod(m, 60)
     return f"{h:02d}:{m:02d}:{s:02d}.{ms:03d}"
+
 
 def pd_intervals_from_mne_annotations(ann) -> np.ndarray:
     """
@@ -79,13 +81,14 @@ def pd_intervals_from_mne_annotations(ann) -> np.ndarray:
 
     return np.array(intervals, dtype=float)
 
+
 def label_windows_by_overlap(
-    n_windows: int,
-    win_sec: float,
-    hop_sec: float,
-    intervals: np.ndarray,
-    *,
-    min_overlap_sec: float = 0.0
+        n_windows: int,
+        win_sec: float,
+        hop_sec: float,
+        intervals: np.ndarray,
+        *,
+        min_overlap_sec: float = 0.0
 ) -> np.ndarray:
     """
     intervals: array (K,2) with [start, stop] in seconds.
@@ -105,6 +108,32 @@ def label_windows_by_overlap(
         y |= (overlap > min_overlap_sec).astype(np.uint8)
 
     return y
+
+
+def mask_to_intervals(mask: np.ndarray, win_sec: float, hop_sec: float):
+    """
+    Convert boolean/0-1 mask over windows to contiguous time intervals (start, duration).
+    Windows i cover [i*hop, i*hop+win]. We merge consecutive positives into one interval.
+    Returns list of (start_sec, duration_sec).
+    """
+    mask = mask.astype(bool)
+    if mask.size == 0 or not mask.any():
+        return []
+
+    idx = np.flatnonzero(mask)
+    # split where index jumps > 1
+    splits = np.where(np.diff(idx) > 1)[0] + 1
+    runs = np.split(idx, splits)
+
+    intervals = []
+    for run in runs:
+        i0 = int(run[0])
+        i1 = int(run[-1])
+        start = i0 * hop_sec
+        end = i1 * hop_sec + win_sec
+        intervals.append((start, end - start))
+    return intervals
+
 
 def compute_metrics(y_true, y_proba, threshold=0.5):
     y_pred = (y_proba >= threshold).astype(np.uint8)
@@ -138,8 +167,8 @@ def main():
     pos_ann_onsets = np.array([on for on, desc in zip(ann.onset, ann.description) if "*" in desc], dtype=float)
     pos_ann_onsets.sort()
 
-    win_sec=0.5
-    hop_sec=0.25
+    win_sec = 0.5
+    hop_sec = 0.25
 
     patient_files: dict[str, list[Path]] = {}
 
@@ -203,7 +232,8 @@ def main():
     # inference
     threshold_values = np.linspace(0.0, 1.0, 101)
     y_proba = model.predict_proba(x_test)[:, 1]
-
+    th = 0.30
+    y_pred = (y_proba >= th).astype(np.uint8)
     intervals = pd_intervals_from_mne_annotations(raw.annotations)
     y_true = label_windows_by_overlap(
         n_windows=len(y_proba),
@@ -213,8 +243,74 @@ def main():
         min_overlap_sec=0.0
     )
 
+    # ---- confusion masks per window ----
+    y_true_b = y_true.astype(bool)
+    y_pred_b = y_pred.astype(bool)
+
+    tp = (y_true_b & y_pred_b).astype(np.uint8)
+    fp = ((~y_true_b) & y_pred_b).astype(np.uint8)
+    fn = (y_true_b & (~y_pred_b)).astype(np.uint8)
+
+    tp_intervals = mask_to_intervals(tp, win_sec, hop_sec)
+    fp_intervals = mask_to_intervals(fp, win_sec, hop_sec)
+    fn_intervals = mask_to_intervals(fn, win_sec, hop_sec)
+
+    T = len(y_proba) * hop_sec + win_sec
+
+    fig, ax = plt.subplots(figsize=(16, 4))
+
+    row_h = 0.8
+    y0 = 0.2
+
+    # GT row (optional, αν θες να υπάρχει πάντα reference)
+    gt_intervals = mask_to_intervals(y_true, win_sec, hop_sec)
+    # GT row (reference)
+    if gt_intervals:
+        ax.broken_barh(
+            gt_intervals,
+            (y0 + 2.0, row_h),
+            facecolors="tab:blue",
+            label="GT (y_true=1)"
+        )
+
+    # TP / FP / FN
+    if tp_intervals:
+        ax.broken_barh(
+            tp_intervals,
+            (y0 + 1.0, row_h),
+            facecolors="tab:green",
+            label="TP (pred=1, true=1)"
+        )
+
+    if fp_intervals:
+        ax.broken_barh(
+            fp_intervals,
+            (y0 + 0.0, row_h),
+            facecolors="tab:red",
+            label="FP (pred=1, true=0)"
+        )
+
+    if fn_intervals:
+        ax.broken_barh(
+            fn_intervals,
+            (y0 + 3.0, row_h),
+            facecolors="tab:orange",
+            label="FN (pred=0, true=1)"
+        )
+
+    ax.set_xlim(0, T)
+    ax.set_ylim(0, 4.2)
+    ax.set_yticks([y0 + 0.4, y0 + 1.4, y0 + 2.4, y0 + 3.4])
+    ax.set_yticklabels(["FP", "TP", "GT", "FN"])
+    ax.set_xlabel("Time (sec)")
+    ax.set_title(f"Timeline vs threshold={th:.2f}")
+    ax.grid(True, axis="x", alpha=0.3)
+    ax.legend(loc="upper right")
+    plt.tight_layout()
+    plt.show()
+
     print("GT positives ratio:", float(y_true.mean()))
-    print(compute_metrics(y_true, y_proba, threshold=0.5))
+    print(compute_metrics(y_true, y_proba, threshold=0.3))
 
     print("y_proba stats:",
           "min", float(y_proba.min()),
@@ -224,13 +320,13 @@ def main():
     for th in [0.1, 0.5, 0.9]:
         y_pred = (y_proba >= th).astype(np.uint8)
         print(th, "hit_ratio", float(y_pred.mean()))
-    threshold_hits=[]
+    threshold_hits = []
     for thres in threshold_values:
         y_pred = (y_proba >= thres).astype(np.uint8)
         pos_idx = np.where(y_pred == 1)[0]
 
-        hit_ratio=len(pos_idx)/len(y_pred)
-        threshold_hits.append((thres,hit_ratio))
+        hit_ratio = len(pos_idx) / len(y_pred)
+        threshold_hits.append((thres, hit_ratio))
 
     thr_arr = np.array([t for t, r in threshold_hits], dtype=float)
     hits_arr = np.array([r for t, r in threshold_hits], dtype=float)
@@ -284,19 +380,18 @@ def main():
 
     print(f"Saved window timestamps + probabilities to: {csv_out.resolve()}")
 
-        # sfreq = 256
-        # step = 0.25  # in sec
-        # step_sample = int(round(step * sfreq))
-        # centers_in_sec = []
-        # for index in pos_idx:
-        #     start_sample = index * step_sample
-        #     center_sample = int(start_sample + step_sample)
-        #     center_sec = center_sample / sfreq
-        #     centers_in_sec.append(center_sec)
-        #
-        # print(f"{len(pos_idx)}/{len(x_test)}")
-        # print(centers_in_sec)
-
+    # sfreq = 256
+    # step = 0.25  # in sec
+    # step_sample = int(round(step * sfreq))
+    # centers_in_sec = []
+    # for index in pos_idx:
+    #     start_sample = index * step_sample
+    #     center_sample = int(start_sample + step_sample)
+    #     center_sec = center_sample / sfreq
+    #     centers_in_sec.append(center_sec)
+    #
+    # print(f"{len(pos_idx)}/{len(x_test)}")
+    # print(centers_in_sec)
 
 
 if __name__ == "__main__":
