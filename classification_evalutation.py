@@ -1,7 +1,7 @@
 import re
 from pathlib import Path
 import numpy as np
-
+import matplotlib.pyplot as plt
 from xgboost import XGBClassifier
 from sklearn.metrics import (
     accuracy_score,
@@ -136,7 +136,7 @@ def summarize_metric(values: list[float]) -> tuple[float, float]:
 # -------------------------------------------------
 
 def main():
-    in_dir = Path("../data/features_cache_basic")
+    in_dir = Path("../../data/freq_time_features_cache_basic")
     patient_files = build_patient_index(in_dir)
     patients = sorted(patient_files.keys())
 
@@ -205,6 +205,58 @@ def main():
     print("\nWorst by F1:")
     for pid, m in worst:
         print(f"  {pid}: f1={m['f1']:.3f} (prec={m['precision']:.3f}, rec={m['recall']:.3f})")
+
+    # -----------------------------
+    # Bar plot: Accuracy per patient
+    # -----------------------------
+    # Patient-level pattern mapping (from metadata table)
+    patient_pattern = {
+        "P20": "LPD",
+        "P28": "LPD",
+        "P36": "LPD",
+        "P48": "GPD",
+        "P49": "GPD",
+        "P54": "GPD",
+        "P55": "LRDA",
+        "P58": "LPD",
+        "P70": "GPD",
+        "P73": "LPD",
+    }
+    pattern_colors = {
+        "LPD": "tab:blue",
+        "GPD": "tab:orange",
+        "LRDA": "tab:green",
+    }
+    # sort patients by accuracy
+    items = sorted(fold_metrics.items(), key=lambda kv: kv[1]["acc"])
+
+    pids = [pid for pid, _ in items]
+    accs = [m["acc"] for _, m in items]
+
+    colors = [
+        pattern_colors.get(patient_pattern.get(pid, "UNK"), "gray")
+        for pid in pids
+    ]
+
+    plt.figure(figsize=(10, 4))
+    plt.bar(pids, accs, color=colors)
+    plt.ylim(0.0, 1.0)
+    plt.ylabel("Accuracy")
+    plt.xlabel("Patient (sorted)")
+    plt.title("LOPO Accuracy per Patient (colored by PD pattern)")
+    plt.grid(axis="y", alpha=0.3)
+
+    # legend (manual)
+    from matplotlib.patches import Patch
+    legend_elems = [
+        Patch(facecolor="tab:blue", label="LPD"),
+        Patch(facecolor="tab:orange", label="GPD"),
+        Patch(facecolor="tab:green", label="LRDA"),
+    ]
+    plt.legend(handles=legend_elems, title="Pattern")
+
+    plt.tight_layout()
+    plt.show()
 
 
 if __name__ == "__main__":
