@@ -11,19 +11,24 @@ def patient_id_from_filename(filename: str):
 
 def main():
     data_dir = Path("../../../data")
-    out_dir = data_dir / "labram_windows_cache"
+    out_dir = data_dir / "labram_windows_cache75%"
     out_dir.mkdir(parents=True, exist_ok=True)
+    #
+    # edf_files = sorted(data_dir.glob("*.edf"))
+    #
+    # selected = []
+    # for p in edf_files:
+    #     pid = patient_id_from_filename(p.name)
+    #     if pid is None:
+    #         continue
+    #     selected.append(p)
+    #
+    # print(f"Found {len(selected)} EDF files")
+    target_file = "P70_GHB_M1679_0000078"
 
     edf_files = sorted(data_dir.glob("*.edf"))
 
-    selected = []
-    for p in edf_files:
-        pid = patient_id_from_filename(p.name)
-        if pid is None:
-            continue
-        selected.append(p)
-
-    print(f"Found {len(selected)} EDF files")
+    selected = [p for p in edf_files if p.stem == target_file]
 
     for i, edf_path in enumerate(selected, start=1):
         print(f"[{i}/{len(selected)}] {edf_path.name}")

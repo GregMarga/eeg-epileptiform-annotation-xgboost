@@ -7,7 +7,7 @@ from tqdm import tqdm
 def create_sliding_epochs(
         data,
         sfreq,
-        step_size=750,  # 75% of 1s -> 25% overlap
+        step_size=250,  # 25% of 1s -> 75% overlap
         window=1000,    # 1 second
 ):
     sample_window = int(round(window * sfreq / 1000))
@@ -31,10 +31,6 @@ def create_sliding_windows_from_eeg(
         notch_freq: float = 50.0,
         target_sfreq: float = 200.0,
 ):
-    data_dir = Path("../../../data")
-    out_dir = data_dir / "labram_windows_cache"
-    out_dir.mkdir(parents=True, exist_ok=True)
-
     raw = mne.io.read_raw_edf(edf_path, preload=True, verbose="ERROR")
 
     # 1) Keep only EEG channels (remove irrelevant channels)
