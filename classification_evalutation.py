@@ -1,5 +1,6 @@
 import re
 from pathlib import Path
+import csv
 import numpy as np
 import matplotlib.pyplot as plt
 from xgboost import XGBClassifier
@@ -31,7 +32,9 @@ def load_features(npz_path: Path):
     z = np.load(npz_path, allow_pickle=True)
     X = z["X"].astype(np.float32)
     y = z["y"].astype(np.uint8).ravel()
-    return X, y
+    center_sec = z["center_sec"].astype(np.float64)
+    center_hmsms = z["center_hmsms"]
+    return X, y, center_sec, center_hmsms
 
 
 def build_patient_index(in_dir: Path) -> dict[str, list[Path]]:
@@ -52,13 +55,23 @@ def build_patient_index(in_dir: Path) -> dict[str, list[Path]]:
     return patient_files
 
 
-def concat_patient_files(file_list: list[Path]) -> tuple[np.ndarray, np.ndarray]:
-    xs, ys = [], []
+def concat_patient_files(
+    file_list: list[Path]
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    xs, ys, cs, ch = [], [], [], []
     for f in file_list:
-        x, y = load_features(f)
+        x, y, center_sec, center_hmsms = load_features(f)
         xs.append(x)
         ys.append(y)
-    return np.concatenate(xs, axis=0), np.concatenate(ys, axis=0)
+        cs.append(center_sec)
+        ch.append(center_hmsms)
+
+    return (
+        np.concatenate(xs, axis=0),
+        np.concatenate(ys, axis=0),
+        np.concatenate(cs, axis=0),
+        np.concatenate(ch, axis=0),
+    )
 
 
 def train_xgb(x_train: np.ndarray, y_train: np.ndarray) -> XGBClassifier:
@@ -89,6 +102,17 @@ def safe_roc_auc(y_true: np.ndarray, y_proba: np.ndarray) -> float:
     if len(np.unique(y_true)) < 2:
         return float("nan")
     return float(roc_auc_score(y_true, y_proba))
+
+def sec_to_hmsms(sec: float) -> str:
+    """
+    Convert seconds to HH:MM:SS.mmm
+    """
+    hours = int(sec // 3600)
+    minutes = int((sec % 3600) // 60)
+    seconds = int(sec % 60)
+    millis = int((sec - int(sec)) * 1000)
+
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}.{millis:03d}"
 
 
 def safe_pr_auc(y_true: np.ndarray, y_proba: np.ndarray) -> float:
@@ -129,14 +153,62 @@ def evaluate_fold(y_true: np.ndarray, y_proba: np.ndarray, thr: float = 0.5) -> 
 def summarize_metric(values: list[float]) -> tuple[float, float]:
     a = np.array(values, dtype=float)
     return float(np.nanmean(a)), float(np.nanstd(a))
+def save_hard_errors_csv(
+    out_csv: Path,
+    y_true: np.ndarray,
+    y_proba: np.ndarray,
+    center_sec: np.ndarray,
+    center_hmsms: np.ndarray,
+    thr: float,
+    top_k: int = 5,
+):
+    y_pred = (y_proba >= thr).astype(np.uint8)
 
+    idx = np.arange(len(y_true))
+
+    fp_idx = idx[(y_true == 0) & (y_pred == 1)]
+    fp_sorted = fp_idx[np.argsort(y_proba[fp_idx])[::-1]]
+    fp_top = fp_sorted[:top_k]
+
+    fn_idx = idx[(y_true == 1) & (y_pred == 0)]
+    fn_sorted = fn_idx[np.argsort(y_proba[fn_idx])]
+    fn_top = fn_sorted[:top_k]
+
+    out_csv.parent.mkdir(parents=True, exist_ok=True)
+    with out_csv.open("w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow([
+            "error_type",
+            "window_center_time",
+            "y_true",
+            "y_pred",
+            "y_proba",
+        ])
+
+        for i in fp_top:
+            w.writerow([
+                "false_positive",
+                sec_to_hmsms(center_sec[i]),
+                int(y_true[i]),
+                int(y_pred[i]),
+                f"{float(y_proba[i]):.8f}",
+            ])
+
+        for i in fn_top:
+            w.writerow([
+                "false_negative",
+                sec_to_hmsms(center_sec[i]),
+                int(y_true[i]),
+                int(y_pred[i]),
+                f"{float(y_proba[i]):.8f}",
+            ])
 
 # -------------------------------------------------
 # LOPO CV
 # -------------------------------------------------
 
 def main():
-    in_dir = Path("../../data/freq_time_features_cache_basic")
+    in_dir = Path("../data/freq_time_features_cache_basic")
     patient_files = build_patient_index(in_dir)
     patients = sorted(patient_files.keys())
 
@@ -158,7 +230,7 @@ def main():
 
         x_train_list, y_train_list = [], []
         for pid in train_pids:
-            x, y = concat_patient_files(patient_files[pid])
+            x, y, _, _ = concat_patient_files(patient_files[pid])
             x_train_list.append(x)
             y_train_list.append(y)
 
@@ -166,13 +238,24 @@ def main():
         y_train = np.concatenate(y_train_list, axis=0)
 
         # test set is that patient's files
-        x_test, y_test = concat_patient_files(patient_files[test_pid])
+        x_test, y_test, center_sec_test, center_hmsms_test = concat_patient_files(patient_files[test_pid])
 
         # train model
         model = train_xgb(x_train, y_train)
 
         # predict
         y_proba = model.predict_proba(x_test)[:, 1]
+
+        out_csv = Path("../../data/lopo_hard_errors") / f"{test_pid}_hard_errors.csv"
+        save_hard_errors_csv(
+            out_csv=out_csv,
+            y_true=y_test,
+            y_proba=y_proba,
+            center_sec=center_sec_test,
+            center_hmsms=center_hmsms_test,
+            thr=thr,
+            top_k=5,
+        )
 
         # metrics
         m = evaluate_fold(y_test, y_proba, thr=thr)

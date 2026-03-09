@@ -3,6 +3,7 @@ import numpy as np
 from mne.channels import make_standard_montage
 from pathlib import Path
 
+
 # ---------------------------
 # 1. Detect bad channels
 # ---------------------------
@@ -63,6 +64,13 @@ def mark_and_interpolate_bad_channels(
     return bad_channels
 
 
+def sec_to_hmsms(sec: float) -> str:
+    ms_total = int(round(sec * 1000))
+    s, ms = divmod(ms_total, 1000)
+    m, s = divmod(s, 60)
+    h, m = divmod(m, 60)
+    return f"{h:02d}:{m:02d}:{s:02d}.{ms:03d}"
+
 
 def create_annotation_centered_epochs(
         data,
@@ -72,16 +80,22 @@ def create_annotation_centered_epochs(
         negative_label='-',
         window=250  # in ms
 ):
-    annotation_onsets = np.round(annotations.onset * sfreq).astype(int)
+    annotation_onsets_samples = np.round(annotations.onset * sfreq).astype(int)
+    annotation_onsets_sec = np.asarray(annotations.onset, dtype=float)
     descriptions = np.array(annotations.description)
 
     labels = []
     epochs = []
+    center_sec_list = []
+    center_hmsms_list = []
 
     margin = int(sfreq * window / 1000)
     n_samples = data.shape[1]
+
     for i in range(len(annotations)):
-        epoch_center_idx = int(annotation_onsets[i])
+        epoch_center_idx = int(annotation_onsets_samples[i])
+        center_sec = float(annotation_onsets_sec[i])
+
         start = epoch_center_idx - margin
         stop = epoch_center_idx + margin
 
@@ -90,14 +104,22 @@ def create_annotation_centered_epochs(
 
         if descriptions[i] == positive_label:
             labels.append(1)
-            epoch = data[:, start:stop]
-            epochs.append(epoch)
+            epochs.append(data[:, start:stop])
+            center_sec_list.append(center_sec)
+            center_hmsms_list.append(sec_to_hmsms(center_sec))
+
         elif descriptions[i] == negative_label:
             labels.append(0)
-            epoch = data[:, start:stop]
-            epochs.append(epoch)
+            epochs.append(data[:, start:stop])
+            center_sec_list.append(center_sec)
+            center_hmsms_list.append(sec_to_hmsms(center_sec))
 
-    return np.array(epochs), np.array(labels)
+    return (
+        np.array(epochs),
+        np.array(labels),
+        np.array(center_sec_list, dtype=np.float64),
+        np.array(center_hmsms_list, dtype=object),
+    )
 
 
 def preprocess_edf_to_windows(
@@ -109,7 +131,6 @@ def preprocess_edf_to_windows(
         positive_label: str = '*',
         negative_label: str = '-',
 ):
-
     raw = mne.io.read_raw_edf(edf_path, preload=True, verbose="ERROR")
 
     # clean channel names
@@ -142,15 +163,23 @@ def preprocess_edf_to_windows(
 
     data = raw.get_data()
     sfreq = float(raw.info['sfreq'])
-    annotations=raw.annotations
+    annotations = raw.annotations
 
-    epochs,labels=create_annotation_centered_epochs(data=data,sfreq=sfreq,annotations=annotations,positive_label=positive_label,negative_label=negative_label)
+    epochs, labels, center_sec, center_hmsms = create_annotation_centered_epochs(
+        data=data,
+        sfreq=sfreq,
+        annotations=annotations,
+        positive_label=positive_label,
+        negative_label=negative_label,
+    )
 
     ch_names = np.array(raw.ch_names, dtype=object)
 
     return (
         epochs.astype(np.float32),
         labels.astype(np.uint8),
+        center_sec.astype(np.float64),
+        center_hmsms.astype(object),
         sfreq,
         ch_names,
         np.array(bad_chs, dtype=object),
@@ -183,4 +212,3 @@ def preprocess_edf_to_windows(
 # assert epochs.ndim == 3
 # assert len(epochs) == len(labels)
 # assert epochs.shape[1] == len(ch_names)
-

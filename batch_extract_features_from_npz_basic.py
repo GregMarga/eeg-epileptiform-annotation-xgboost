@@ -20,6 +20,7 @@ def count_local_extrema(x: np.ndarray):
 def rms_amplitude(x: np.ndarray) -> float:
     return float(np.sqrt(np.mean(x * x)))
 
+
 # -----------------------------
 # Feature primitives (1D) - frequency domain (NO HF)
 # -----------------------------
@@ -43,7 +44,8 @@ def compute_welch_psd_1d(
         noverlap = nperseg // 2
 
     f, psd = welch(
-        x, fs=fs,
+        x,
+        fs=fs,
         nperseg=nperseg,
         noverlap=noverlap,
         detrend="constant",
@@ -124,7 +126,6 @@ def freq_features_1d(
     return [total_p, peak_f, *mean_feats, *norm_feats]
 
 
-
 # -----------------------------
 # Per-window feature extraction
 # -----------------------------
@@ -199,6 +200,8 @@ def process_npz_file(npz_path: Path, out_dir: Path, batch_windows: int = 512):
 
     windows = z["windows"]              # (n_windows, n_channels, win_len)
     labels = z["labels"]
+    center_sec = z["center_sec"]
+    center_hmsms = z["center_hmsms"]
     sfreq = float(z["sfreq"])
     ch_names = z["ch_names"]
     edf_name = z.get("edf_name", npz_path.name)
@@ -222,6 +225,8 @@ def process_npz_file(npz_path: Path, out_dir: Path, batch_windows: int = 512):
         out_path,
         X=X,
         y=labels.astype(np.uint8),
+        center_sec=np.array(center_sec, dtype=np.float64),
+        center_hmsms=np.array(center_hmsms, dtype=object),
         sfreq=sfreq,
         ch_names=np.array(ch_names, dtype=object),
         feature_names=np.array(fnames, dtype=object),
@@ -247,7 +252,7 @@ def main():
 
     for i, p in enumerate(npz_files, start=1):
         print(f"\n[{i}/{len(npz_files)}] Processing {p.name}")
-        process_npz_file(p, out_dir, batch_windows=512 )
+        process_npz_file(p, out_dir, batch_windows=512)
 
     print("\nDone.")
 
