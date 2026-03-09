@@ -99,6 +99,40 @@ def create_annotation_centered_epochs(
 
     return np.array(epochs), np.array(labels)
 
+def preprocess_raw_edf(
+        edf_path: str,
+        l_freq: float = 0.5,
+        h_freq: float = 40.0,
+        high_factor: float = 8.0,
+        low_factor: float = 10.0,
+):
+    raw = mne.io.read_raw_edf(edf_path, preload=True, verbose="ERROR")
+
+    raw.rename_channels(lambda ch: ch.replace('EEG ', '').strip())
+
+    montage = make_standard_montage("standard_1020")
+    raw.set_montage(montage, match_case=False, on_missing='ignore')
+
+    raw.set_eeg_reference('average', verbose="ERROR")
+
+    raw.filter(
+        l_freq=l_freq,
+        h_freq=h_freq,
+        method='fir',
+        fir_design='firwin',
+        phase='zero',
+        verbose="ERROR",
+    )
+
+    bad_chs = mark_and_interpolate_bad_channels(
+        raw,
+        high_factor=high_factor,
+        low_factor=low_factor,
+        plot=False,
+    )
+
+    return raw, np.array(bad_chs, dtype=object)
+
 
 def preprocess_edf_to_windows(
         edf_path: str,

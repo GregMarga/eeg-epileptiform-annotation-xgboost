@@ -242,6 +242,68 @@ def main():
         intervals=intervals,
         min_overlap_sec=0.0
     )
+    # ---------------------------------------------
+    # Hard examples:
+    # - outside intervals (negative) with highest probability
+    # - inside intervals (positive) with lowest probability
+    # ---------------------------------------------
+    top_k = 50  # πόσα θέλεις να κρατήσεις από κάθε κατηγορία
+
+    centers_sec = np.arange(len(y_proba), dtype=float) * hop_sec + 0.5 * win_sec
+
+    pos_idx = np.where(y_true == 1)[0]  # μέσα στα intervals
+    neg_idx = np.where(y_true == 0)[0]  # έξω από τα intervals
+
+    # αρνητικά με μεγαλύτερη πιθανότητα (δηλ. false-alarm-like δύσκολα negatives)
+    neg_sorted = neg_idx[np.argsort(y_proba[neg_idx])[::-1]]
+
+    # θετικά με μικρότερη πιθανότητα (δηλ. missed-like δύσκολα positives)
+    pos_sorted = pos_idx[np.argsort(y_proba[pos_idx])]
+
+    neg_top = neg_sorted[:top_k]
+    pos_top = pos_sorted[:top_k]
+
+    hard_rows = []
+
+    # negative examples: outside intervals, highest probability
+    for i in neg_top:
+        csec = centers_sec[i]
+        hard_rows.append([
+            "negative",
+            int(i),
+            f"{csec:.6f}",
+            sec_to_hmsms(csec),
+            f"{float(y_proba[i]):.8f}",
+        ])
+
+    # positive examples: inside intervals, lowest probability
+    for i in pos_top:
+        csec = centers_sec[i]
+        hard_rows.append([
+            "positive",
+            int(i),
+            f"{csec:.6f}",
+            sec_to_hmsms(csec),
+            f"{float(y_proba[i]):.8f}",
+        ])
+
+    # προαιρετικά: sort όλου του csv κατά πιθανότητα
+    # hard_rows.sort(key=lambda row: float(row[4]), reverse=True)
+
+    csv_hard_out = Path(f"../../../data/{test_pid}_hard_windows.csv")
+
+    with csv_hard_out.open("w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow([
+            "label",  # positive / negative
+            "window_index",
+            "center_sec",
+            "center_hmsms",
+            "probability",
+        ])
+        w.writerows(hard_rows)
+
+    print(f"Saved hard windows to: {csv_hard_out.resolve()}")
 
     # ---- confusion masks per window ----
     y_true_b = y_true.astype(bool)

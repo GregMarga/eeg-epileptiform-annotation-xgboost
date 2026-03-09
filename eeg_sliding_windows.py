@@ -6,6 +6,7 @@ from scipy.stats import skew, kurtosis
 from scipy.signal import welch
 from tqdm import tqdm
 
+
 def detect_bad_channels_by_std(
         raw: mne.io.BaseRaw,
         high_factor: float = 8.0,
@@ -86,11 +87,6 @@ def create_sliding_windows_from_eeg(
         high_factor: float = 8.0,
         low_factor: float = 10.0,
 ):
-    data_dir = Path("../../data")
-    out_dir = data_dir / "windows_cache"
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    edf_files = sorted(data_dir.glob("*.edf"))
 
     raw = mne.io.read_raw_edf(
         "../../../data/P70_GHB_M1679_0000078.edf",
@@ -185,11 +181,12 @@ def feature_names(ch_names: np.ndarray) -> list[str]:
             names.append(f"{ch}_{f}")
     return names
 
+
 def compute_welch_psd_1d(
-    x: np.ndarray,
-    fs: float,
-    nperseg: int | None = None,
-    noverlap: int | None = None,
+        x: np.ndarray,
+        fs: float,
+        nperseg: int | None = None,
+        noverlap: int | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     x = np.asarray(x, dtype=np.float64)
 
@@ -237,18 +234,18 @@ def peak_frequency_in_band(f: np.ndarray, psd: np.ndarray, fmin: float, fmax: fl
 
 
 def freq_features_1d(
-    x: np.ndarray,
-    fs: float,
-    *,
-    total_range: tuple[float, float] = (1.0, 40.0),
-    nperseg: int | None = None,
-    noverlap: int | None = None,
+        x: np.ndarray,
+        fs: float,
+        *,
+        total_range: tuple[float, float] = (1.0, 40.0),
+        nperseg: int | None = None,
+        noverlap: int | None = None,
 ) -> list[float]:
     bands = {
         "delta": (1.0, 3.0),
         "theta": (4.0, 8.0),
         "alpha": (9.0, 13.0),
-        "beta":  (14.0, 20.0),
+        "beta": (14.0, 20.0),
     }
 
     f, psd = compute_welch_psd_1d(x, fs=fs, nperseg=nperseg, noverlap=noverlap)
@@ -269,6 +266,7 @@ def freq_features_1d(
         norm_feats.append(bp / (total_p + eps))
 
     return [total_p, peak_f, *mean_feats, *norm_feats]
+
 
 def extract_features_for_one_window(window_2d: np.ndarray, fs: float) -> np.ndarray:
     """
@@ -331,14 +329,30 @@ def main():
         l_freq=0.5, h_freq=40.0, high_factor=8.0, low_factor=10.0,
     )
 
+    windows_out = Path("../testP70/windows_cache")
+    windows_out.mkdir(parents=True, exist_ok=True)
+
+    windows_path = windows_out / "P70_GHB_M1679_0000078_full_windows.npz"
+
+    np.savez_compressed(
+        windows_path,
+        windows=epochs.astype(np.float32),
+        sfreq=float(sfreq),
+        ch_names=np.array(ch_names, dtype=object),
+        bad_chs=np.array(bad_chs, dtype=object),
+        source_edf="P70_GHB_M1679_0000078",
+    )
+
+    print(f"Saved windows: {windows_path} | windows={epochs.shape}")
+
     print(f"Created sliding windows: {len(epochs)}")
 
-    process_np_windows_one_patient(
-        windows=epochs,
-        sfreq=sfreq,
-        ch_names=ch_names,
-        out_dir=out_dir,
-    )
+    # process_np_windows_one_patient(
+    #     windows=epochs,
+    #     sfreq=sfreq,
+    #     ch_names=ch_names,
+    #     out_dir=out_dir,
+    # )
 
 
 if __name__ == "__main__":
