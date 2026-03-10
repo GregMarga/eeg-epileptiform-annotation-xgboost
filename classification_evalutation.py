@@ -15,6 +15,7 @@ from sklearn.metrics import (
     confusion_matrix,
 )
 
+
 # -------------------------------------------------
 # Helpers
 # -------------------------------------------------
@@ -34,7 +35,8 @@ def load_features(npz_path: Path):
     y = z["y"].astype(np.uint8).ravel()
     center_sec = z["center_sec"].astype(np.float64)
     center_hmsms = z["center_hmsms"]
-    return X, y, center_sec, center_hmsms
+    source_edf = str(z["source_edf"])
+    return X, y, center_sec, center_hmsms, source_edf
 
 
 def build_patient_index(in_dir: Path) -> dict[str, list[Path]]:
@@ -56,21 +58,25 @@ def build_patient_index(in_dir: Path) -> dict[str, list[Path]]:
 
 
 def concat_patient_files(
-    file_list: list[Path]
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    xs, ys, cs, ch = [], [], [], []
+        file_list: list[Path]
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, list[str]]:
+    xs, ys, cs, ch, edfs = [], [], [], [], []
+
     for f in file_list:
-        x, y, center_sec, center_hmsms = load_features(f)
+        x, y, center_sec, center_hmsms, source_edf = load_features(f)
         xs.append(x)
         ys.append(y)
         cs.append(center_sec)
         ch.append(center_hmsms)
+
+        edfs.extend([source_edf] * len(y))
 
     return (
         np.concatenate(xs, axis=0),
         np.concatenate(ys, axis=0),
         np.concatenate(cs, axis=0),
         np.concatenate(ch, axis=0),
+        np.array(edfs, dtype=object),
     )
 
 
@@ -102,6 +108,7 @@ def safe_roc_auc(y_true: np.ndarray, y_proba: np.ndarray) -> float:
     if len(np.unique(y_true)) < 2:
         return float("nan")
     return float(roc_auc_score(y_true, y_proba))
+
 
 def sec_to_hmsms(sec: float) -> str:
     """
@@ -153,12 +160,15 @@ def evaluate_fold(y_true: np.ndarray, y_proba: np.ndarray, thr: float = 0.5) -> 
 def summarize_metric(values: list[float]) -> tuple[float, float]:
     a = np.array(values, dtype=float)
     return float(np.nanmean(a)), float(np.nanstd(a))
+
+
 def save_hard_errors_csv(
     out_csv: Path,
     y_true: np.ndarray,
     y_proba: np.ndarray,
     center_sec: np.ndarray,
     center_hmsms: np.ndarray,
+    source_edf: np.ndarray,
     thr: float,
     top_k: int = 5,
 ):
@@ -183,6 +193,7 @@ def save_hard_errors_csv(
             "y_true",
             "y_pred",
             "y_proba",
+            "recording_file",
         ])
 
         for i in fp_top:
@@ -192,6 +203,7 @@ def save_hard_errors_csv(
                 int(y_true[i]),
                 int(y_pred[i]),
                 f"{float(y_proba[i]):.8f}",
+                source_edf[i],
             ])
 
         for i in fn_top:
@@ -201,7 +213,9 @@ def save_hard_errors_csv(
                 int(y_true[i]),
                 int(y_pred[i]),
                 f"{float(y_proba[i]):.8f}",
+                source_edf[i],
             ])
+
 
 # -------------------------------------------------
 # LOPO CV
@@ -225,25 +239,22 @@ def main():
     agg = {"tp": 0.0, "fp": 0.0, "tn": 0.0, "fn": 0.0}
 
     for test_pid in patients:
-        # build train set from all other patients
         train_pids = [p for p in patients if p != test_pid]
 
         x_train_list, y_train_list = [], []
         for pid in train_pids:
-            x, y, _, _ = concat_patient_files(patient_files[pid])
+            x, y, _, _, _ = concat_patient_files(patient_files[pid])
             x_train_list.append(x)
             y_train_list.append(y)
 
         x_train = np.concatenate(x_train_list, axis=0)
         y_train = np.concatenate(y_train_list, axis=0)
 
-        # test set is that patient's files
-        x_test, y_test, center_sec_test, center_hmsms_test = concat_patient_files(patient_files[test_pid])
+        x_test, y_test, center_sec_test, center_hmsms_test, source_edf_test = concat_patient_files(
+            patient_files[test_pid]
+        )
 
-        # train model
         model = train_xgb(x_train, y_train)
-
-        # predict
         y_proba = model.predict_proba(x_test)[:, 1]
 
         out_csv = Path("../../data/lopo_hard_errors") / f"{test_pid}_hard_errors.csv"
@@ -253,6 +264,7 @@ def main():
             y_proba=y_proba,
             center_sec=center_sec_test,
             center_hmsms=center_hmsms_test,
+            source_edf=source_edf_test,
             thr=thr,
             top_k=5,
         )
