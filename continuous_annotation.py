@@ -18,7 +18,7 @@ EMB_PATH = Path(
     r"P70_GHB_M1679_0000078_embeddings.npy"
 )
 
-OUT_EDF_PATH = Path(r"../../../Data/produced_data/P70_GHB_M1679_0000078_knn_annotated.edf")
+OUT_EDF_PATH = Path(r"../../../Data/produced_data/P70_GHB_M1679_0000078_knn_annotated_negs.edf")
 
 WINDOW_SEC = 1.0
 OVERLAP = 0.75
@@ -26,6 +26,7 @@ STEP_SEC = WINDOW_SEC * (1.0 - OVERLAP)  # 0.25 s
 K = 1
 
 NEG_SUPPORT = [
+    "0:20:30",
     "0:30:47.421",
     "0:30:50.007",
     "0:31:22.886",
@@ -37,6 +38,9 @@ POS_SUPPORT = [
     "1:29:47.660",
     "1:30:00.855",
     "1:31:03.868",
+    "1:30:05.209",
+    "1:30:41.903",
+    "1:31:04.643",
 ]
 
 
@@ -149,7 +153,38 @@ def interval_overlaps_any(window_start: float, window_stop: float, intervals: li
         if window_start < b and window_stop > a:
             return True
     return False
+def windows_inside_pd_to_annotations(
+    mask: np.ndarray,
+    pd_intervals: list[tuple[float, float]],
+    window_sec: float,
+    step_sec: float,
+    label: str = "knn_neg",
+    orig_time=None,
+) -> mne.Annotations:
+    """
+    Keep only windows whose mask is True AND that overlap a PD interval.
+    """
+    onsets = []
+    durations = []
+    descriptions = []
 
+    idxs = np.where(mask)[0]
+
+    for i in idxs:
+        start = i * step_sec
+        stop = start + window_sec
+
+        if interval_overlaps_any(start, stop, pd_intervals):
+            onsets.append(start)
+            durations.append(window_sec)
+            descriptions.append(label)
+
+    return mne.Annotations(
+        onset=onsets,
+        duration=durations,
+        description=descriptions,
+        orig_time=orig_time,
+    )
 
 def positive_windows_outside_pd_to_annotations(
         positive_mask: np.ndarray,
@@ -233,6 +268,7 @@ def main():
     pos_frac = neighbor_labels.mean(axis=1)
 
     print(f"Predicted positives (all): {int(y_pred.sum())} / {len(y_pred)}")
+    print(f"Predicted hard negatives (all): {int((pos_frac == 0).sum())} / {len(y_pred)}")
     print(f"Predicted hard positives (all): {int((pos_frac == 1).sum())} / {len(y_pred)}")
 
     print("\nLoading EDF...")
@@ -246,17 +282,17 @@ def main():
     print(f"PD intervals found: {len(pd_intervals)}")
 
     print("\nCreating window-level kNN annotations outside PD intervals only...")
-    hard_positive_mask = (pos_frac == 1.0)
+    print("\nCreating window-level kNN negative annotations inside PD intervals only...")
+    hard_negative_mask = (pos_frac == 0.0)
 
-    new_ann = positive_windows_outside_pd_to_annotations(
-        positive_mask=hard_positive_mask,
+    new_ann = windows_inside_pd_to_annotations(
+        mask=hard_negative_mask,
         pd_intervals=pd_intervals,
         window_sec=WINDOW_SEC,
         step_sec=STEP_SEC,
-        label="knn_pos",
+        label="knn_neg",
         orig_time=pd_ann.orig_time,
     )
-
     print(f"New annotations created outside PD intervals: {len(new_ann)}")
 
     combined_ann = pd_ann + new_ann
