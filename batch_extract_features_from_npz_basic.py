@@ -64,7 +64,16 @@ def bandpower_trapz(f: np.ndarray, psd: np.ndarray, fmin: float, fmax: float) ->
     m = _band_mask(f, fmin, fmax)
     if not np.any(m):
         return 0.0
-    return float(np.trapezoid(psd[m], f[m]))
+
+    f_band = f[m]
+    psd_band = psd[m]
+
+    if len(f_band) == 1:
+        # approximate bandpower from one bin
+        df = f[1] - f[0] if len(f) > 1 else 0.0
+        return float(psd_band[0] * df)
+
+    return float(np.trapezoid(psd_band, f_band))
 
 
 def mean_psd_in_band(f: np.ndarray, psd: np.ndarray, fmin: float, fmax: float) -> float:
@@ -122,7 +131,6 @@ def freq_features_1d(
         mp = mean_psd_in_band(f, psd, fmin, fmax)
         mean_feats.append(mp)
         norm_feats.append(bp / (total_p + eps))
-
     return [total_p, peak_f, *mean_feats, *norm_feats]
 
 

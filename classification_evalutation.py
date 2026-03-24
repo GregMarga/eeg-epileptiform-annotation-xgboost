@@ -15,7 +15,24 @@ from sklearn.metrics import (
     confusion_matrix,
 )
 
-
+FEATURE_NAMES_16 = [
+    "zero_cross",
+    "maxima",
+    "minima",
+    "rms",
+    "skew",
+    "kurt_excess",
+    "total_power_1_40",
+    "peak_freq_1_40",
+    "mean_band_delta",
+    "mean_band_theta",
+    "mean_band_alpha",
+    "mean_band_beta",
+    "norm_band_delta",
+    "norm_band_theta",
+    "norm_band_alpha",
+    "norm_band_beta",
+]
 # -------------------------------------------------
 # Helpers
 # -------------------------------------------------
@@ -31,12 +48,18 @@ def patient_from_filename(name: str) -> str | None:
 
 def load_features(npz_path: Path):
     z = np.load(npz_path, allow_pickle=True)
+    # print(z["feature_names"])
     X = z["X"].astype(np.float32)
+    n_samples = X.shape[0]
+    X = X.reshape(n_samples, 19, 16)   # (samples, channels, features_per_channel)
+    X_avg = X.mean(axis=1)             # (samples, 16) average feature per channel
+
     y = z["y"].astype(np.uint8).ravel()
     center_sec = z["center_sec"].astype(np.float64)
     center_hmsms = z["center_hmsms"]
     source_edf = str(z["source_edf"])
-    return X, y, center_sec, center_hmsms, source_edf
+
+    return X_avg, y, center_sec, center_hmsms, source_edf
 
 
 def build_patient_index(in_dir: Path) -> dict[str, list[Path]]:
@@ -91,7 +114,7 @@ def train_xgb(x_train: np.ndarray, y_train: np.ndarray) -> XGBClassifier:
         learning_rate=0.05,
         max_depth=4,
         subsample=0.8,
-        colsample_bytree=1.0,
+        colsample_bytree=0.8,
         objective="binary:logistic",
         eval_metric="logloss",
         tree_method="hist",
@@ -100,7 +123,10 @@ def train_xgb(x_train: np.ndarray, y_train: np.ndarray) -> XGBClassifier:
         random_state=42,
     )
     model.fit(x_train, y_train)
-    return model
+    score = model.get_booster().get_score(importance_type="gain")
+
+
+    return model,score
 
 
 def safe_roc_auc(y_true: np.ndarray, y_proba: np.ndarray) -> float:
@@ -216,7 +242,13 @@ def save_hard_errors_csv(
                 source_edf[i],
             ])
 
+def print_feature_stats(X: np.ndarray, feature_names: list[str], title: str = "Feature stats"):
+    means = X.mean(axis=0)
+    stds = X.std(axis=0)
 
+    print(f"\n=== {title} ===")
+    for name, mu, sigma in zip(feature_names, means, stds):
+        print(f"{name:20s} mean={mu:12.6e}  std={sigma:12.6e}")
 # -------------------------------------------------
 # LOPO CV
 # -------------------------------------------------
@@ -238,6 +270,16 @@ def main():
     # aggregate confusion counts across folds
     agg = {"tp": 0.0, "fp": 0.0, "tn": 0.0, "fn": 0.0}
 
+    all_x = []
+    for pid in patients:
+        x, y, _, _, _ = concat_patient_files(patient_files[pid])
+        all_x.append(x)
+
+    X_all = np.concatenate(all_x, axis=0)
+    print_feature_stats(X_all, FEATURE_NAMES_16, title="All dataset feature stats")
+
+    n_features = len(FEATURE_NAMES_16)
+    all_importances = []
     for test_pid in patients:
         train_pids = [p for p in patients if p != test_pid]
 
@@ -254,20 +296,29 @@ def main():
             patient_files[test_pid]
         )
 
-        model = train_xgb(x_train, y_train)
+        model,score = train_xgb(x_train, y_train)
+
+        imp_vec = np.zeros(n_features)
+
+        for k, v in score.items():
+            idx = int(k[1:])  # "f6" → 6
+            imp_vec[idx] = v
+
+        all_importances.append(imp_vec)
+
         y_proba = model.predict_proba(x_test)[:, 1]
 
-        out_csv = Path("../../data/lopo_hard_errors") / f"{test_pid}_hard_errors.csv"
-        save_hard_errors_csv(
-            out_csv=out_csv,
-            y_true=y_test,
-            y_proba=y_proba,
-            center_sec=center_sec_test,
-            center_hmsms=center_hmsms_test,
-            source_edf=source_edf_test,
-            thr=thr,
-            top_k=5,
-        )
+        # out_csv = Path("../../data/lopo_hard_errors") / f"{test_pid}_hard_errors.csv"
+        # save_hard_errors_csv(
+        #     out_csv=out_csv,
+        #     y_true=y_test,
+        #     y_proba=y_proba,
+        #     center_sec=center_sec_test,
+        #     center_hmsms=center_hmsms_test,
+        #     source_edf=source_edf_test,
+        #     thr=thr,
+        #     top_k=5,
+        # )
 
         # metrics
         m = evaluate_fold(y_test, y_proba, thr=thr)
@@ -286,7 +337,14 @@ def main():
             f"prec={m['precision']:.3f} rec={m['recall']:.3f} "
             f"roc_auc={m['roc_auc']:.3f} pr_auc={m['pr_auc']:.3f}"
         )
+    all_importances = np.array(all_importances)  # (n_folds, n_features)
 
+    mean_imp = all_importances.mean(axis=0)
+    std_imp = all_importances.std(axis=0)
+
+    print("\n=== Feature importance across LOPO folds (gain) ===")
+    for name, mu, sigma in zip(FEATURE_NAMES_16, mean_imp, std_imp):
+        print(f"{name:20s} mean={mu:6.4f}  std={sigma:6.4f}")
     print("\n=== LOPO summary (mean ± std across patients) ===")
     for k in keys:
         mean, std = summarize_metric(collected[k])
