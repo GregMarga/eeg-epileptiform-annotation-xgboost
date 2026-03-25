@@ -61,29 +61,7 @@ def load_features(npz_path: Path):
             f"Window mismatch in {npz_path}: len(windows)={len(windows)} vs len(y)={len(y)}"
         )
 
-    source_edf = normalize_source_edf(source_edf, len(y))
-
     return X, y, windows, source_edf
-
-
-def normalize_source_edf(source_edf, n_rows: int) -> np.ndarray:
-    if source_edf is None:
-        return np.array([""] * n_rows, dtype=object)
-
-    if np.isscalar(source_edf):
-        return np.array([str(source_edf)] * n_rows, dtype=object)
-
-    arr = np.asarray(source_edf)
-
-    if arr.ndim == 0:
-        return np.array([str(arr.item())] * n_rows, dtype=object)
-
-    if len(arr) != n_rows:
-        raise ValueError(
-            f"source_edf length mismatch: expected {n_rows}, got {len(arr)}"
-        )
-
-    return arr.astype(object)
 
 
 def build_patient_index(in_dir: Path) -> dict[str, list[Path]]:
@@ -106,7 +84,7 @@ def build_patient_index(in_dir: Path) -> dict[str, list[Path]]:
 
 
 def concat_patient_files(
-    file_list: list[Path]
+        file_list: list[Path]
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     xs, ys, ws, edfs = [], [], [], []
 
@@ -125,13 +103,13 @@ def concat_patient_files(
     )
 
 
-def train_xgb(x_train: np.ndarray, y_train: np.ndarray) -> XGBClassifier:
+def train_xgb(x_train: np.ndarray, y_train: np.ndarray) -> tuple[XGBClassifier, dict[str, float | list[float]]]:
     pos = int(y_train.sum())
     neg = int((y_train == 0).sum())
     scale_pos_weight = (neg / pos) if pos > 0 else 1.0
 
     model = XGBClassifier(
-        n_estimators=10000,
+        n_estimators=250,
         learning_rate=0.05,
         max_depth=4,
         subsample=0.8,
@@ -144,7 +122,9 @@ def train_xgb(x_train: np.ndarray, y_train: np.ndarray) -> XGBClassifier:
         random_state=42,
     )
     model.fit(x_train, y_train)
-    return model
+    score = model.get_booster().get_score(importance_type="gain")
+
+    return model, score
 
 
 def safe_roc_auc(y_true: np.ndarray, y_proba: np.ndarray) -> float:
@@ -157,6 +137,35 @@ def safe_pr_auc(y_true: np.ndarray, y_proba: np.ndarray) -> float:
     if len(np.unique(y_true)) < 2:
         return float("nan")
     return float(average_precision_score(y_true, y_proba))
+
+def plot_probability_histograms(
+    y_train: np.ndarray,
+    y_proba_train: np.ndarray,
+    y_test: np.ndarray,
+    y_proba_test: np.ndarray,
+    test_pid: str,
+):
+    plt.figure(figsize=(10, 4))
+    plt.hist(y_proba_train[y_train == 0], bins=30, alpha=0.5, density=True, label="Train y=0")
+    plt.hist(y_proba_train[y_train == 1], bins=30, alpha=0.5, density=True, label="Train y=1")
+    plt.xlabel("Predicted probability for class 1")
+    plt.ylabel("Density")
+    plt.title(f"Train probability distribution - {test_pid}")
+    plt.legend()
+    plt.grid(alpha=0.3)
+    plt.tight_layout()
+    plt.show()
+
+    plt.figure(figsize=(10, 4))
+    plt.hist(y_proba_test[y_test == 0], bins=30, alpha=0.5, density=True, label="Test y=0")
+    plt.hist(y_proba_test[y_test == 1], bins=30, alpha=0.5, density=True, label="Test y=1")
+    plt.xlabel("Predicted probability for class 1")
+    plt.ylabel("Density")
+    plt.title(f"Test probability distribution - {test_pid}")
+    plt.legend()
+    plt.grid(alpha=0.3)
+    plt.tight_layout()
+    plt.show()
 
 
 def evaluate_fold(y_true: np.ndarray, y_proba: np.ndarray, thr: float = 0.5) -> dict[str, float]:
@@ -206,63 +215,6 @@ def format_window(window) -> str:
     return "[" + ", ".join(str(v) for v in flat) + "]"
 
 
-def save_hard_errors_csv(
-    out_csv: Path,
-    y_true: np.ndarray,
-    y_proba: np.ndarray,
-    windows: np.ndarray,
-    source_edf: np.ndarray,
-    thr: float,
-    top_k: int = 5,
-):
-    y_pred = (y_proba >= thr).astype(np.uint8)
-
-    idx = np.arange(len(y_true))
-
-    fp_idx = idx[(y_true == 0) & (y_pred == 1)]
-    fp_sorted = fp_idx[np.argsort(y_proba[fp_idx])[::-1]]
-    fp_top = fp_sorted[:top_k]
-
-    fn_idx = idx[(y_true == 1) & (y_pred == 0)]
-    fn_sorted = fn_idx[np.argsort(y_proba[fn_idx])]
-    fn_top = fn_sorted[:top_k]
-
-    out_csv.parent.mkdir(parents=True, exist_ok=True)
-    with out_csv.open("w", newline="", encoding="utf-8") as f:
-        w = csv.writer(f)
-        w.writerow([
-            "error_type",
-            "window_index",
-            "window",
-            "y_true",
-            "y_pred",
-            "y_proba",
-            "recording_file",
-        ])
-
-        for i in fp_top:
-            w.writerow([
-                "false_positive",
-                int(i),
-                format_window(windows[i]),
-                int(y_true[i]),
-                int(y_pred[i]),
-                f"{float(y_proba[i]):.8f}",
-                source_edf[i],
-            ])
-
-        for i in fn_top:
-            w.writerow([
-                "false_negative",
-                int(i),
-                format_window(windows[i]),
-                int(y_true[i]),
-                int(y_pred[i]),
-                f"{float(y_proba[i]):.8f}",
-                source_edf[i],
-            ])
-
-
 # -------------------------------------------------
 # LOPO CV
 # -------------------------------------------------
@@ -281,7 +233,8 @@ def main():
     collected = {k: [] for k in keys}
 
     agg = {"tp": 0.0, "fp": 0.0, "tn": 0.0, "fn": 0.0}
-
+    n_features = 200
+    all_importances = []
     for test_pid in patients:
         train_pids = [p for p in patients if p != test_pid]
 
@@ -298,19 +251,26 @@ def main():
             patient_files[test_pid]
         )
 
-        model = train_xgb(x_train, y_train)
-        y_proba = model.predict_proba(x_test)[:, 1]
+        model, score = train_xgb(x_train, y_train)
 
-        out_csv = Path(r"C:\Users\gregm\KU Leuven\Thesis\Data\embeddings\lopo_hard_errors") / f"{test_pid}_hard_errors.csv"
-        save_hard_errors_csv(
-            out_csv=out_csv,
-            y_true=y_test,
-            y_proba=y_proba,
-            windows=windows_test,
-            source_edf=source_edf_test,
-            thr=thr,
-            top_k=5,
+        train_proba=model.predict_proba(x_train)[:,1]
+        test_proba=model.predict_proba(x_test)[:,1]
+
+        plot_probability_histograms(
+            y_train, train_proba,
+            y_test, test_proba,
+            test_pid
         )
+
+        imp_vec = np.zeros(n_features)
+
+        for k, v in score.items():
+            idx = int(k[1:])  # "f6" → 6
+            imp_vec[idx] = v
+
+        all_importances.append(imp_vec)
+
+        y_proba = model.predict_proba(x_test)[:, 1]
 
         m = evaluate_fold(y_test, y_proba, thr=thr)
         fold_metrics[test_pid] = m
@@ -342,6 +302,15 @@ def main():
     for pid, m in worst:
         print(f"  {pid}: f1={m['f1']:.3f} (prec={m['precision']:.3f}, rec={m['recall']:.3f})")
 
+    all_importances = np.array(all_importances)  # (n_folds, n_features)
+
+    mean_imp = all_importances.mean(axis=0)
+    std_imp = all_importances.std(axis=0)
+
+    idx = np.argsort(mean_imp)[::-1]
+
+    for i in idx:
+        print(f"f{i:02d}  mean={mean_imp[i]:.6f}  std={std_imp[i]:.6f}")
     patient_pattern = {
         "P20": "LPD",
         "P28": "LPD",
