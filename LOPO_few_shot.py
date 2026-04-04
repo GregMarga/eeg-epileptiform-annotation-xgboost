@@ -50,7 +50,8 @@ def load_features(npz_path: Path):
     z = np.load(npz_path, allow_pickle=True)
     X = z["X"].astype(np.float32)
     n_samples = X.shape[0]
-    X = X.reshape(n_samples, 19, 16)   # (samples, channels, features_per_channel)
+    n_channels = len(z["ch_names"])
+    X = X.reshape(n_samples, n_channels, 16)   # (samples, channels, features_per_channel)
     X_avg = X.mean(axis=1)             # (samples, 16) average feature per channel
 
     y = z["y"].astype(np.uint8).ravel()
@@ -237,7 +238,7 @@ def print_feature_stats(X: np.ndarray, feature_names: list[str], title: str = "F
 # -------------------------------------------------
 
 def main():
-    in_dir = Path("../data/freq_time_features_cache_basic")
+    in_dir = Path("../data/80hz_freq_time_features_cache_basic")
     patient_files = build_patient_index(in_dir)
     patients = sorted(patient_files.keys())
 

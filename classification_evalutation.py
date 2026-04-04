@@ -50,8 +50,9 @@ def load_features(npz_path: Path):
     z = np.load(npz_path, allow_pickle=True)
     # print(z["feature_names"])
     X = z["X"].astype(np.float32)
+    n_channels = len(z["ch_names"])
     n_samples = X.shape[0]
-    X = X.reshape(n_samples, 19, 16)   # (samples, channels, features_per_channel)
+    X = X.reshape(n_samples, n_channels, 16)   # (samples, channels, features_per_channel)
     X_avg = X.mean(axis=1)             # (samples, 16) average feature per channel
 
     y = z["y"].astype(np.uint8).ravel()
@@ -254,7 +255,7 @@ def print_feature_stats(X: np.ndarray, feature_names: list[str], title: str = "F
 # -------------------------------------------------
 
 def main():
-    in_dir = Path("../data/freq_time_features_cache_basic")
+    in_dir = Path("../data/80hz_freq_time_features_cache_basic")
     patient_files = build_patient_index(in_dir)
     patients = sorted(patient_files.keys())
 
@@ -307,19 +308,6 @@ def main():
         all_importances.append(imp_vec)
 
         y_proba = model.predict_proba(x_test)[:, 1]
-
-        # out_csv = Path("../../data/lopo_hard_errors") / f"{test_pid}_hard_errors.csv"
-        # save_hard_errors_csv(
-        #     out_csv=out_csv,
-        #     y_true=y_test,
-        #     y_proba=y_proba,
-        #     center_sec=center_sec_test,
-        #     center_hmsms=center_hmsms_test,
-        #     source_edf=source_edf_test,
-        #     thr=thr,
-        #     top_k=5,
-        # )
-
         # metrics
         m = evaluate_fold(y_test, y_proba, thr=thr)
         fold_metrics[test_pid] = m

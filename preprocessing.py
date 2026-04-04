@@ -8,6 +8,7 @@ from pathlib import Path
 # 1. Detect bad channels
 # ---------------------------
 
+
 def detect_bad_channels_by_std(
         raw: mne.io.BaseRaw,
         high_factor: float = 8.0,
@@ -62,6 +63,50 @@ def mark_and_interpolate_bad_channels(
         raw.plot(scalings='auto', block=True)
 
     return bad_channels
+
+# Τυπικό longitudinal (double banana) montage
+LONGITUDINAL_PAIRS = [
+    # Lateral left
+    ("Fp1", "F7"), ("F7", "T3"), ("T3", "T5"), ("T5", "O1"),
+    # Lateral right
+    ("Fp2", "F8"), ("F8", "T4"), ("T4", "T6"), ("T6", "O2"),
+    # Parasagittal left
+    ("Fp1", "F3"), ("F3", "C3"), ("C3", "P3"), ("P3", "O1"),
+    # Parasagittal right
+    ("Fp2", "F4"), ("F4", "C4"), ("C4", "P4"), ("P4", "O2"),
+    # Midline
+    ("Fz", "Cz"), ("Cz", "Pz"),
+]
+
+
+def apply_longitudinal_montage(
+        raw: mne.io.BaseRaw,
+        pairs: list[tuple[str, str]] = LONGITUDINAL_PAIRS,
+) -> tuple[np.ndarray, list[str]]:
+    """
+    Υπολογίζει bipolar channels από τα ζεύγη.
+    Επιστρέφει:
+        bipolar_data : (n_pairs, n_samples)
+        bipolar_names: ["Fp1-F7", ...]
+    """
+    data = raw.get_data()
+    ch_names_lower = {ch.lower(): i for i, ch in enumerate(raw.ch_names)}
+
+    bipolar_data = []
+    bipolar_names = []
+
+    for anode, cathode in pairs:
+        a_idx = ch_names_lower.get(anode.lower())
+        c_idx = ch_names_lower.get(cathode.lower())
+
+        if a_idx is None or c_idx is None:
+            print(f"  Skipping {anode}-{cathode}: channel not found")
+            continue
+
+        bipolar_data.append(data[a_idx] - data[c_idx])
+        bipolar_names.append(f"{anode}-{cathode}")
+
+    return np.array(bipolar_data, dtype=np.float32), bipolar_names
 
 
 def sec_to_hmsms(sec: float) -> str:
@@ -130,38 +175,34 @@ def preprocess_edf_to_windows(
         low_factor: float = 10.0,
         positive_label: str = '*',
         negative_label: str = '-',
+        montage_pairs: list[tuple[str, str]] = LONGITUDINAL_PAIRS,
 ):
     raw = mne.io.read_raw_edf(edf_path, preload=True, verbose="ERROR")
-
-    # clean channel names
     raw.rename_channels(lambda ch: ch.replace('EEG ', '').strip())
 
-    # montage
     montage = make_standard_montage("standard_1020")
     raw.set_montage(montage, match_case=False, on_missing='ignore')
 
-    # average reference
+    # ΔΕΝ κάνεις average reference εδώ —
+    # το bipolar montage είναι το ίδιο reference
+
+    raw.filter(
+        l_freq=l_freq, h_freq=h_freq,
+        method='fir', fir_design='firwin',
+        phase='zero', verbose="ERROR",
+    )
+
+    raw.resample(80, verbose="ERROR")
+
+    bad_chs = mark_and_interpolate_bad_channels(  # πρώτα bad channels
+        raw, high_factor=high_factor,
+        low_factor=low_factor, plot=False,
+    )
+
     raw.set_eeg_reference('average', verbose="ERROR")
 
-    # filter
-    raw.filter(
-        l_freq=l_freq,
-        h_freq=h_freq,
-        method='fir',
-        fir_design='firwin',
-        phase='zero',
-        verbose="ERROR",
-    )
-
-    # bad channels detection + interpolation (your existing function)
-    bad_chs = mark_and_interpolate_bad_channels(
-        raw,
-        high_factor=high_factor,
-        low_factor=low_factor,
-        plot=False,
-    )
-
     data = raw.get_data()
+    ch_names = np.array(raw.ch_names, dtype=object)  # <-- 19 κανάλια
     sfreq = float(raw.info['sfreq'])
     annotations = raw.annotations
 
@@ -173,8 +214,6 @@ def preprocess_edf_to_windows(
         negative_label=negative_label,
     )
 
-    ch_names = np.array(raw.ch_names, dtype=object)
-
     return (
         epochs.astype(np.float32),
         labels.astype(np.uint8),
@@ -185,30 +224,4 @@ def preprocess_edf_to_windows(
         np.array(bad_chs, dtype=object),
     )
 
-## check
-# BASE = Path(__file__).resolve().parents[2]  # Thesis
-# edf_path = BASE / "Data" / "p28_GHB_00000_0002249_0001.edf"
-#
-# epochs, labels, sfreq, ch_names, bad_chs = preprocess_edf_to_windows(
-#     edf_path=str(edf_path),
-#     l_freq=0.5,
-#     h_freq=40.0,
-#     positive_label='*',
-#     negative_label='-',
-# )
-#
-# print("Epochs shape:", epochs.shape)   # (n_epochs, n_channels, n_samples)
-# print("Labels shape:", labels.shape)   # (n_epochs,)
-# print("Sampling freq:", sfreq)
-# print("Channels:", ch_names)
-# print("Bad channels:", bad_chs)
-#
-#
-# print("positives:", labels.sum())
-# print("negatives:", (labels == 0).sum())
-#
-# print("unique labels:", np.unique(labels))
-#
-# assert epochs.ndim == 3
-# assert len(epochs) == len(labels)
-# assert epochs.shape[1] == len(ch_names)
+

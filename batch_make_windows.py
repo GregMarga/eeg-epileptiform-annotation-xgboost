@@ -11,8 +11,8 @@ def patient_id_from_filename(filename: str):
 
 
 def main():
-    data_dir = Path("../../../data")
-    out_dir = data_dir / "windows_cache"
+    data_dir = Path("../data")
+    out_dir = data_dir / "windows_cache_80hz"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     edf_files = sorted(data_dir.glob("*.edf"))
