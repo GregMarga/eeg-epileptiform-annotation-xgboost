@@ -55,6 +55,9 @@ def preprocess_for_labram(
     montage = make_standard_montage("standard_1020")
     raw.set_montage(montage, match_case=False, on_missing="ignore")
 
+    # Re-reference to average
+    raw.set_eeg_reference(ref_channels="average", projection=False, verbose="ERROR")
+
     # Bandpass filter
     raw.filter(
         l_freq=l_freq,
@@ -72,10 +75,10 @@ def preprocess_for_labram(
     raw.resample(target_sfreq, npad="auto", verbose="ERROR")
 
     # Convert to μV, normalize to 0.1mV units (paper), clip for artifact robustness
-    data_uv = raw.get_data() * 1e6
-    data_normalized = np.clip(data_uv / 100.0, -5.0, 5.0)
+    data_uv = raw.get_data() * 1e6  #don't need to divide with 100 it's in the code for labram
+    # data_normalized = np.clip(data_uv / 100.0, -5.0, 5.0)
 
-    return raw, data_normalized
+    return raw, data_uv
 
 
 def batch_create_annotation_windows_from_eeg(
