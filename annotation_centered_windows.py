@@ -11,7 +11,7 @@ def create_annotation_centered_epochs(
         sfreq,
         positive_label='*',
         negative_label='-',
-        window=500,   # half-window in ms -> total window = 1 sec
+        window=4000,   # half-window in ms -> total window = 8 sec
 ):
     annotation_onsets = np.round(annotations.onset * sfreq).astype(int)
     descriptions = np.array(annotations.description)
@@ -71,10 +71,11 @@ def preprocess_for_labram(
     # Resample to target sampling frequency
     raw.resample(target_sfreq, npad="auto", verbose="ERROR")
 
-    # Convert signal from volts to microvolts
+    # Convert to μV, normalize to 0.1mV units (paper), clip for artifact robustness
     data_uv = raw.get_data() * 1e6
+    data_normalized = np.clip(data_uv / 100.0, -5.0, 5.0)
 
-    return raw, data_uv
+    return raw, data_normalized
 
 
 def batch_create_annotation_windows_from_eeg(
@@ -86,7 +87,7 @@ def batch_create_annotation_windows_from_eeg(
 ):
     raw = mne.io.read_raw_edf(edf_path, preload=True, verbose="ERROR")
 
-    raw, data_uv = preprocess_for_labram(
+    raw, data_normalized = preprocess_for_labram(
         raw,
         l_freq=l_freq,
         h_freq=h_freq,
@@ -98,11 +99,11 @@ def batch_create_annotation_windows_from_eeg(
     ch_names = np.array(raw.ch_names, dtype=object)
     annotations = raw.annotations
 
-    print("Data shape (channels, samples):", data_uv.shape)
+    print("Data shape (channels, samples):", data_normalized.shape)
     print("Sampling frequency:", sfreq)
 
     epochs, labels = create_annotation_centered_epochs(
-        data=data_uv,
+        data=data_normalized,
         annotations=annotations,
         sfreq=sfreq,
     )
@@ -120,8 +121,8 @@ def patient_id_from_filename(filename: str):
 
 
 def main():
-    data_dir = Path("../../../data")
-    out_dir = data_dir / "corrected_labram_labeled_windows_cache"
+    data_dir = Path("../data")
+    out_dir = data_dir / "labram_labeled_windows_8s"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     edf_files = sorted(data_dir.glob("*.edf"))
