@@ -220,7 +220,7 @@ def format_window(window) -> str:
 # -------------------------------------------------
 
 def main():
-    in_dir = Path(r"C:\Users\gregm\KU Leuven\Thesis\Data\labram_embeddings\rpp_embeddings_centered_labeled")
+    in_dir = Path("../Data/labram_classification")
     patient_files = build_patient_index(in_dir)
     patients = sorted(patient_files.keys())
 
@@ -256,11 +256,11 @@ def main():
         train_proba=model.predict_proba(x_train)[:,1]
         test_proba=model.predict_proba(x_test)[:,1]
 
-        plot_probability_histograms(
-            y_train, train_proba,
-            y_test, test_proba,
-            test_pid
-        )
+        # plot_probability_histograms(
+        #     y_train, train_proba,
+        #     y_test, test_proba,
+        #     test_pid
+        # )
 
         imp_vec = np.zeros(n_features)
 
@@ -309,8 +309,8 @@ def main():
 
     idx = np.argsort(mean_imp)[::-1]
 
-    for i in idx:
-        print(f"f{i:02d}  mean={mean_imp[i]:.6f}  std={std_imp[i]:.6f}")
+    # for i in idx:
+    #     print(f"f{i:02d}  mean={mean_imp[i]:.6f}  std={std_imp[i]:.6f}")
     patient_pattern = {
         "P20": "LPD",
         "P28": "LPD",

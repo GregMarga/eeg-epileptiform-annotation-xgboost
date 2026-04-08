@@ -6,9 +6,9 @@ import numpy as np
 # Paths
 # -------------------------------------------------
 
-EMB_DIR = Path(r"C:\Users\gregm\KU Leuven\Thesis\Data\labram_embeddings\rpp_embeddings_centered")
-LABEL_DIR = Path(r"C:\Users\gregm\KU Leuven\Thesis\Data\corrected_labram_labeled_windows_cache")
-OUT_DIR = Path(r"C:\Users\gregm\KU Leuven\Thesis\Data\labram_embeddings\rpp_embeddings_centered_labeled")
+EMB_DIR = Path("../data/embeddings_8sLabeledWindows-noReference/embeddings")
+LABEL_DIR = Path("../data/embeddings_8sLabeledWindows-noReference/labels")
+OUT_DIR = Path("../data/labram_classification")
 
 
 # -------------------------------------------------
@@ -28,6 +28,15 @@ def embedding_base_name(path: Path) -> str:
         raise ValueError(f"Unexpected embedding filename: {name}")
     return name[:-len(suffix)]
 
+def load_label_file_npy(path: Path):
+    """Load labels from a 1D .npy file (binary 0/1 per window)."""
+    y = np.load(path, allow_pickle=True).astype(np.uint8).ravel()
+    n = len(y)
+    # Δημιουργούμε placeholder windows (index-based) αφού δεν υπάρχουν
+    windows = np.arange(n).reshape(-1, 1)
+    edf_name = path.stem.replace("_embeddings", "")
+    ch_names = None
+    return y, windows, edf_name, ch_names, ["labels"]
 
 def candidate_label_paths(base: str) -> list[Path]:
     return [
@@ -35,6 +44,7 @@ def candidate_label_paths(base: str) -> list[Path]:
         LABEL_DIR / f"{base}_windows.npz",
         LABEL_DIR / f"{base}_labeled_windows.npz",
         LABEL_DIR / f"{base}.npz",
+        LABEL_DIR / f"{base}_embeddings.npy",  # ← νέο
     ]
 
 
@@ -72,6 +82,8 @@ def load_embedding_file(path: Path) -> np.ndarray:
 
 
 def load_label_file(path: Path):
+    if path.suffix == ".npy":
+        return load_label_file_npy(path)
     z = np.load(path, allow_pickle=True)
 
     if not isinstance(z, np.lib.npyio.NpzFile):
