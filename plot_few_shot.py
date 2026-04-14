@@ -1,6 +1,5 @@
 import csv
 from pathlib import Path
-import numpy as np
 import matplotlib.pyplot as plt
 
 # -------------------------------------------------
@@ -14,8 +13,13 @@ CSV_FILES = {
     "Combined (Handcrafted + LaBraM)": Path("results_combined.csv"),
 }
 
-METRIC  = "acc"      # change to "bacc", "f1", "roc_auc" etc.
+LOPO_BASELINES = {
+    "LaBraM LOPO (88.24%)":      (0.8824, "#2196F3"),
+    "Handcrafted LOPO (88.08%)": (0.8808, "#4CAF50"),
+    "Combined LOPO (90.21%)":    (0.9021, "#9C27B0"),
+}
 
+METRIC  = "acc"
 COLORS  = ["#2196F3", "#4CAF50", "#FF5722", "#9C27B0"]
 MARKERS = ["o", "s", "^", "D"]
 
@@ -48,13 +52,17 @@ for (label, path), color, marker in zip(CSV_FILES.items(), COLORS, MARKERS):
     ax.plot(n_shots, means, marker=marker, color=color, label=label,
             linewidth=2, markersize=6)
 
+for label, (value, color) in LOPO_BASELINES.items():
+    ax.axhline(y=value, color=color, linestyle="--", linewidth=1.5,
+               alpha=0.7, label=label)
+
 ax.set_xlabel("Number of Support Samples (N-shot per class)", fontsize=12)
 ax.set_ylabel("Accuracy", fontsize=12)
 ax.set_title("Few-Shot Learning Curve — Prototypical Network", fontsize=13)
 ax.set_xticks(n_shots)
 ax.set_xlim(0.5, max(n_shots) + 0.5)
 ax.set_ylim(0.5, 1.0)
-ax.legend(fontsize=10, loc="lower right")
+ax.legend(fontsize=9, loc="lower right")
 ax.grid(True, alpha=0.3, linestyle="--")
 
 plt.tight_layout()
