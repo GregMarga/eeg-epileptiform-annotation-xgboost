@@ -20,8 +20,7 @@ from sklearn.metrics import (
 # -------------------------------------------------
 
 FEATURES_DIR = Path("../data/80hz_freq_time_features_cache_basic")
-EMBEDDINGS_DIR = Path("../data/labram_classification")
-OUT_DIR = Path("../data/labram_classification_combined")
+EMBEDDINGS_DIR = Path("../data/labram_classification_1s")
 
 # -------------------------------------------------
 # Helpers

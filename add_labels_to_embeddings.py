@@ -6,9 +6,9 @@ import numpy as np
 # Paths
 # -------------------------------------------------
 
-EMB_DIR = Path("../data/embeddings_8sLabeledWindows-noReference/embeddings")
-LABEL_DIR = Path("../data/embeddings_8sLabeledWindows-noReference/labels")
-OUT_DIR = Path("../data/labram_classification")
+EMB_DIR = Path("../data/embeddings_labram_labeled_windows_1s/embeddings")
+LABEL_DIR = Path("../data/embeddings_labram_labeled_windows_1s/labels")
+OUT_DIR = Path("../data/labram_classification_1s")
 
 
 # -------------------------------------------------

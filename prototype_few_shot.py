@@ -17,13 +17,16 @@ from sklearn.metrics import (
 # Paths
 # -------------------------------------------------
 
-EMBEDDINGS_DIR = Path("../data/labram_classification")
+EMBEDDINGS_DIR = Path("../data/labram_classification_1s")
 FEATURES_DIR   = Path("../data/80hz_freq_time_features_cache_basic")
 
-N_SHOT      = 12       # positives AND negatives per support set
+N_SHOT      = 1       # positives AND negatives per support set
 RANDOM_SEED = 42
-USE_COMBINED = False   # True = handcrafted + LaBraM, False = LaBraM only
+
+
+USE_LABRAM_ONLY      = False
 USE_HANDCRAFTED_ONLY = True
+USE_COMBINED         = False
 # -------------------------------------------------
 # Helpers
 # -------------------------------------------------
@@ -52,25 +55,72 @@ def load_features(path: Path) -> tuple[np.ndarray, np.ndarray]:
     n_channels = len(z["ch_names"])
     n_samples  = X.shape[0]
     X = X.reshape(n_samples, n_channels, -1).mean(axis=1)  # (N, 16)
+    X = X[:, [6]]                                        # keep only features 6 and 9
     y = z["y"].astype(np.uint8).ravel()
     return X, y
 
 
 def load_recording(base, emb_index, feat_index):
-    if USE_HANDCRAFTED_ONLY and base in feat_index:
+    if USE_HANDCRAFTED_ONLY:
+        if base not in feat_index:
+            raise ValueError(f"No handcrafted features for {base}")
         return load_features(feat_index[base])
 
-    X_emb, y_emb = load_embeddings(emb_index[base])
-    if USE_COMBINED and base in feat_index:
+    if USE_COMBINED:
+        X_emb, y_emb = load_embeddings(emb_index[base])
+        if base not in feat_index:
+            raise ValueError(f"No handcrafted features for {base}")
         X_feat, y_feat = load_features(feat_index[base])
         if len(y_feat) != len(y_emb):
             raise ValueError(f"Window mismatch for {base}")
         if not np.array_equal(y_feat, y_emb):
             raise ValueError(f"Label mismatch for {base}")
-        X = np.hstack([X_feat, X_emb])
-        return X, y_emb
+        return np.hstack([X_feat, X_emb]), y_emb
 
-    return X_emb, y_emb
+    # USE_LABRAM_ONLY
+    return load_embeddings(emb_index[base])
+
+
+def prototypical_predict(
+    X_support: np.ndarray,
+    y_support: np.ndarray,
+    X_query: np.ndarray,
+    distance: str = "euclidean",
+) -> np.ndarray:
+
+    if USE_HANDCRAFTED_ONLY:
+        scaler = StandardScaler()
+        X_support = scaler.fit_transform(X_support)
+        X_query   = scaler.transform(X_query)
+    elif USE_COMBINED:
+        scaler = StandardScaler()
+        X_support = X_support.copy()
+        X_query   = X_query.copy()
+        X_support[:, :16] = scaler.fit_transform(X_support[:, :16])
+        X_query[:, :16]   = scaler.transform(X_query[:, :16])
+    # USE_LABRAM_ONLY → no scaling
+
+    proto_pos = X_support[y_support == 1].mean(axis=0)
+    proto_neg = X_support[y_support == 0].mean(axis=0)
+
+    if distance == "euclidean":
+        d_pos = np.linalg.norm(X_query - proto_pos, axis=1)
+        d_neg = np.linalg.norm(X_query - proto_neg, axis=1)
+    elif distance == "cosine":
+        def cosine_dist(X, proto):
+            num = X @ proto
+            den = np.linalg.norm(X, axis=1) * np.linalg.norm(proto) + 1e-8
+            return 1 - num / den
+        d_pos = cosine_dist(X_query, proto_pos)
+        d_neg = cosine_dist(X_query, proto_neg)
+    else:
+        raise ValueError(f"Unknown distance: {distance}")
+
+    logit_pos = -d_pos
+    logit_neg = -d_neg
+    exp_pos = np.exp(logit_pos - np.maximum(logit_pos, logit_neg))
+    exp_neg = np.exp(logit_neg - np.maximum(logit_pos, logit_neg))
+    return exp_pos / (exp_pos + exp_neg)
 
 
 def sample_support(
@@ -98,50 +148,6 @@ def sample_support(
     query_idx = np.setdiff1d(np.arange(len(y)), support_idx)
 
     return X[support_idx], y[support_idx], X[query_idx], y[query_idx]
-
-
-def prototypical_predict(
-    X_support: np.ndarray,
-    y_support: np.ndarray,
-    X_query: np.ndarray,
-    distance: str = "euclidean",
-) -> np.ndarray:
-    """
-    Compute class prototypes and return probability of class 1 for each query.
-    Uses softmax over negative distances.
-    """
-    if USE_COMBINED or USE_HANDCRAFTED_ONLY:
-        scaler = StandardScaler()
-        X_support = X_support.copy()
-        X_query = X_query.copy()
-        X_support[:, :16] = scaler.fit_transform(X_support[:, :16])
-        X_query[:, :16]   = scaler.transform(X_query[:, :16])
-
-    proto_pos = X_support[y_support == 1].mean(axis=0)  # (D,)
-    proto_neg = X_support[y_support == 0].mean(axis=0)  # (D,)
-
-    if distance == "euclidean":
-        d_pos = np.linalg.norm(X_query - proto_pos, axis=1)
-        d_neg = np.linalg.norm(X_query - proto_neg, axis=1)
-    elif distance == "cosine":
-        def cosine_dist(X, proto):
-            num = X @ proto
-            den = np.linalg.norm(X, axis=1) * np.linalg.norm(proto) + 1e-8
-            return 1 - num / den
-        d_pos = cosine_dist(X_query, proto_pos)
-        d_neg = cosine_dist(X_query, proto_neg)
-    else:
-        raise ValueError(f"Unknown distance: {distance}")
-
-    # softmax over negative distances → probability of class 1
-    logit_pos = -d_pos
-    logit_neg = -d_neg
-    exp_pos = np.exp(logit_pos - np.maximum(logit_pos, logit_neg))
-    exp_neg = np.exp(logit_neg - np.maximum(logit_pos, logit_neg))
-    proba_pos = exp_pos / (exp_pos + exp_neg)
-
-    return proba_pos
-
 
 def safe_roc_auc(y_true, y_proba):
     if len(np.unique(y_true)) < 2:
@@ -181,12 +187,22 @@ def summarize_metric(values) -> tuple[float, float]:
 # -------------------------------------------------
 
 def main():
+    assert sum([USE_LABRAM_ONLY, USE_HANDCRAFTED_ONLY, USE_COMBINED]) == 1, \
+        "Exactly one mode flag must be True"
+
+    mode_str = (
+        "Handcrafted + LaBraM" if USE_COMBINED
+        else "Handcrafted only" if USE_HANDCRAFTED_ONLY
+        else "LaBraM only"
+    )
+    print(f"Mode: {mode_str}")
+
     emb_index  = build_index(EMBEDDINGS_DIR, "_embeddings_labeled.npz")
     feat_index = build_index(FEATURES_DIR, "_features.npz") if (USE_COMBINED or USE_HANDCRAFTED_ONLY) else {}
 
     recordings = sorted(emb_index.keys())
     print(f"Recordings: {len(recordings)}")
-    print(f"Mode: {'Handcrafted + LaBraM' if USE_COMBINED else 'Handcrafted only' if USE_HANDCRAFTED_ONLY else 'LaBraM only'}")
+
     print(f"Support set: {N_SHOT} pos + {N_SHOT} neg per recording\n")
 
     rng = np.random.default_rng(RANDOM_SEED)

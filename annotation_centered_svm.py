@@ -115,7 +115,7 @@ def train_svm(
         ("scaler", StandardScaler()),
         ("svm", SVC(
             kernel="rbf",
-            C=1.0,
+            C=1.5,
             gamma="scale",
             class_weight="balanced",
             probability=False,
@@ -182,7 +182,7 @@ def format_window(window) -> str:
 # -------------------------------------------------
 
 def main():
-    in_dir = Path(r"C:\Users\gregm\KU Leuven\Thesis\Data\labram_embeddings\rpp_embeddings_centered_labeled")
+    in_dir = Path("../data/labram_classification_1s")
     patient_files = build_patient_index(in_dir)
     patients = sorted(patient_files.keys())
 

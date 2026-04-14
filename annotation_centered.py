@@ -220,7 +220,7 @@ def format_window(window) -> str:
 # -------------------------------------------------
 
 def main():
-    in_dir = Path("../Data/labram_classification")
+    in_dir = Path("../Data/labram_classification_1s")
     patient_files = build_patient_index(in_dir)
     patients = sorted(patient_files.keys())
 
