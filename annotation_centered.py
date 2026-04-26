@@ -109,7 +109,7 @@ def train_xgb(x_train: np.ndarray, y_train: np.ndarray) -> tuple[XGBClassifier, 
     scale_pos_weight = (neg / pos) if pos > 0 else 1.0
 
     model = XGBClassifier(
-        n_estimators=250,
+        n_estimators=400,
         learning_rate=0.05,
         max_depth=4,
         subsample=0.8,
@@ -220,7 +220,7 @@ def format_window(window) -> str:
 # -------------------------------------------------
 
 def main():
-    in_dir = Path("../Data/labram_classification_1s")
+    in_dir = Path("../../../Data/labram_classification_1s")
     patient_files = build_patient_index(in_dir)
     patients = sorted(patient_files.keys())
 
