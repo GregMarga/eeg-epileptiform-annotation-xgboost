@@ -19,8 +19,8 @@ from sklearn.metrics import (
 # Paths
 # -------------------------------------------------
 
-FEATURES_DIR = Path("../data/80hz_freq_time_features_cache_basic")
-EMBEDDINGS_DIR = Path("../data/labram_classification_1s")
+FEATURES_DIR = Path("../../../data/80hz_freq_time_features_cache_basic")
+EMBEDDINGS_DIR = Path("../../../data/labram_classification_1s")
 
 # -------------------------------------------------
 # Helpers
