@@ -1,113 +1,130 @@
+import re
+import ast
 import mne
 import numpy as np
-from mne.channels import make_standard_montage
 from pathlib import Path
+from mne.channels import make_standard_montage
 
 
-# ---------------------------
-# 1. Detect bad channels
-# ---------------------------
+# -------------------------------------------------
+# PyPREP report parser
+# -------------------------------------------------
+
+# Categories that lead to interpolation. If a channel appears
+# ONLY in hf_noise, we leave it untouched.
+INTERPOLATE_CATEGORIES = ("deviation", "correlation", "ransac")
 
 
-def detect_bad_channels_by_std(
+def _parse_channel_list(value: str) -> list[str]:
+    """
+    Accepts the raw value after the ':' character, e.g.
+        "['Fp2', 'O1']"
+        "[np.str_('Fp1')]"
+        "[np.str_('F8')]"
+    Returns a clean list of strings.
+    """
+    cleaned = re.sub(r"np\.str_\(([^)]+)\)", r"\1", value.strip())
+    try:
+        return [str(c) for c in ast.literal_eval(cleaned)]
+    except (ValueError, SyntaxError):
+        return []
+
+
+def parse_channel_detection_report(txt_path: Path) -> dict[str, dict[str, list[str]]]:
+    """
+    Parse the report file and return:
+        {
+            "P20_GHB_00015_0000348": {
+                "deviation":   [...],
+                "hf_noise":    ["F8"],
+                "correlation": ["T6", "P4", "Pz"],
+                "ransac":      [],
+            },
+            ...
+        }
+    """
+    text = Path(txt_path).read_text(encoding="utf-8", errors="replace")
+
+    # Each entry starts with a header line like "[i/N] FILENAME.edf"
+    edf_header_re = re.compile(r"^\[\d+/\d+\]\s+(.+?)\.edf\s*$", re.MULTILINE)
+    matches = list(edf_header_re.finditer(text))
+
+    report: dict[str, dict[str, list[str]]] = {}
+
+    for i, m in enumerate(matches):
+        basename = m.group(1).strip()
+        block_start = m.end()
+        block_end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        block = text[block_start:block_end]
+
+        cats: dict[str, list[str]] = {
+            "deviation":   [],
+            "hf_noise":    [],
+            "correlation": [],
+            "ransac":      [],
+        }
+
+        # Match lines like "    deviation   : [..]"
+        for cat in cats.keys():
+            cat_re = re.compile(rf"^\s*{cat}\s*:\s*(\[.*?\])\s*$", re.MULTILINE)
+            cm = cat_re.search(block)
+            if cm:
+                cats[cat] = _parse_channel_list(cm.group(1))
+
+        report[basename] = cats
+
+    return report
+
+
+def channels_to_interpolate(report_entry: dict[str, list[str]]) -> list[str]:
+    """
+    Takes the {category -> [channels]} dict for one EDF and returns
+    the list of channels to interpolate: those appearing in ANY of
+    deviation / correlation / ransac. Channels that appear only in
+    hf_noise are ignored.
+    """
+    to_interp: set[str] = set()
+    for cat in INTERPOLATE_CATEGORIES:
+        to_interp.update(report_entry.get(cat, []))
+    return sorted(to_interp)
+
+
+def mark_and_interpolate_bad_channels_from_report(
         raw: mne.io.BaseRaw,
-        high_factor: float = 8.0,
-        low_factor: float = 10.0,
-):
-    # find outlier (bad) channels based on std
-
-    data = raw.get_data()  # shape: (n_channels, n_samples)
-    stds = data.std(axis=1)  # std per channel
-    median_std = np.median(stds)
-
-    high_threshold = median_std * high_factor
-    low_threshold = median_std / low_factor
-
-    bad_high = np.where(stds > high_threshold)[0]  # too noisy eg electrode pop artifacts
-    bad_low = np.where(stds < low_threshold)[0]  # dead channel
-
-    bad_idx = np.unique(np.concatenate([bad_high, bad_low]))
-    bad_channels = [raw.ch_names[i] for i in bad_idx]
-
-    return bad_channels, stds
-
-
-def mark_and_interpolate_bad_channels(
-        raw: mne.io.BaseRaw,
-        high_factor: float = 8.0,
-        low_factor: float = 10.0,
+        edf_basename: str,
+        report: dict[str, dict[str, list[str]]],
         plot: bool = False,
-):
-    bad_channels, stds = detect_bad_channels_by_std(
-        raw,
-        high_factor=high_factor,
-        low_factor=low_factor,
-    )
+) -> list[str]:
+    """
+    Pulls the bad channels for this specific EDF from the pre-computed
+    PyPREP report and interpolates ONLY those that fall under
+    deviation / correlation / ransac.
+    """
+    if edf_basename not in report:
+        print(f"  [WARN] No report entry for {edf_basename} — skipping interpolation")
+        return []
 
-    # print("STD per channel:")
-    # for name, s in zip(raw.ch_names, stds):
-    #     print(f"{name}: {s:.3e}")
-    # print("Detected bad channels:", bad_channels)
+    entry = report[edf_basename]
+    bad_channels = channels_to_interpolate(entry)
 
-    # Mark as bad
-    raw.info['bads'] = bad_channels
+    # Defensive: keep only channels that actually exist in the raw object
+    bad_channels = [ch for ch in bad_channels if ch in raw.ch_names]
 
-    # Spatial interpolation
-    if len(bad_channels) > 0:
-        raw.interpolate_bads(reset_bads=True)
-        # print("Interpolated bad channels.")
-    # else:
-    #     print("No bad channels detected, nothing to interpolate.")
+    if not bad_channels:
+        return []
+
+    raw.info["bads"] = bad_channels
+    raw.interpolate_bads(reset_bads=True)
 
     if plot:
-        raw.plot(scalings='auto', block=True)
+        raw.plot(scalings="auto", block=True)
 
     return bad_channels
 
-# Τυπικό longitudinal (double banana) montage
-LONGITUDINAL_PAIRS = [
-    # Lateral left
-    ("Fp1", "F7"), ("F7", "T3"), ("T3", "T5"), ("T5", "O1"),
-    # Lateral right
-    ("Fp2", "F8"), ("F8", "T4"), ("T4", "T6"), ("T6", "O2"),
-    # Parasagittal left
-    ("Fp1", "F3"), ("F3", "C3"), ("C3", "P3"), ("P3", "O1"),
-    # Parasagittal right
-    ("Fp2", "F4"), ("F4", "C4"), ("C4", "P4"), ("P4", "O2"),
-    # Midline
-    ("Fz", "Cz"), ("Cz", "Pz"),
-]
 
-
-def apply_longitudinal_montage(
-        raw: mne.io.BaseRaw,
-        pairs: list[tuple[str, str]] = LONGITUDINAL_PAIRS,
-) -> tuple[np.ndarray, list[str]]:
-    """
-    Υπολογίζει bipolar channels από τα ζεύγη.
-    Επιστρέφει:
-        bipolar_data : (n_pairs, n_samples)
-        bipolar_names: ["Fp1-F7", ...]
-    """
-    data = raw.get_data()
-    ch_names_lower = {ch.lower(): i for i, ch in enumerate(raw.ch_names)}
-
-    bipolar_data = []
-    bipolar_names = []
-
-    for anode, cathode in pairs:
-        a_idx = ch_names_lower.get(anode.lower())
-        c_idx = ch_names_lower.get(cathode.lower())
-
-        if a_idx is None or c_idx is None:
-            print(f"  Skipping {anode}-{cathode}: channel not found")
-            continue
-
-        bipolar_data.append(data[a_idx] - data[c_idx])
-        bipolar_names.append(f"{anode}-{cathode}")
-
-    return np.array(bipolar_data, dtype=np.float32), bipolar_names
-
+# -------------------------------------------------
+# Helpers — unchanged logic
+# -------------------------------------------------
 
 def sec_to_hmsms(sec: float) -> str:
     ms_total = int(round(sec * 1000))
@@ -121,9 +138,9 @@ def create_annotation_centered_epochs(
         data,
         annotations,
         sfreq,
-        positive_label='*',
-        negative_label='-',
-        window=250  # in ms
+        positive_label="*",
+        negative_label="-",
+        window=250,  # in ms
 ):
     annotation_onsets_samples = np.round(annotations.onset * sfreq).astype(int)
     annotation_onsets_sec = np.asarray(annotations.onset, dtype=float)
@@ -152,7 +169,6 @@ def create_annotation_centered_epochs(
             epochs.append(data[:, start:stop])
             center_sec_list.append(center_sec)
             center_hmsms_list.append(sec_to_hmsms(center_sec))
-
         elif descriptions[i] == negative_label:
             labels.append(0)
             epochs.append(data[:, start:stop])
@@ -167,43 +183,48 @@ def create_annotation_centered_epochs(
     )
 
 
+# -------------------------------------------------
+# Main preprocessing function
+# -------------------------------------------------
+
 def preprocess_edf_to_windows(
         edf_path: str,
+        report: dict[str, dict[str, list[str]]],
         l_freq: float = 0.5,
         h_freq: float = 40.0,
-        high_factor: float = 8.0,
-        low_factor: float = 10.0,
-        positive_label: str = '*',
-        negative_label: str = '-',
-        montage_pairs: list[tuple[str, str]] = LONGITUDINAL_PAIRS,
+        positive_label: str = "*",
+        negative_label: str = "-",
 ):
-    raw = mne.io.read_raw_edf(edf_path, preload=True, verbose="ERROR")
-    raw.rename_channels(lambda ch: ch.replace('EEG ', '').strip())
+    edf_path = Path(edf_path)
+    edf_basename = edf_path.stem  # e.g. "P20_GHB_00015_0000348"
+
+    raw = mne.io.read_raw_edf(str(edf_path), preload=True, verbose="ERROR")
+    raw.rename_channels(lambda ch: ch.replace("EEG ", "").strip())
 
     montage = make_standard_montage("standard_1020")
-    raw.set_montage(montage, match_case=False, on_missing='ignore')
-
-    # ΔΕΝ κάνεις average reference εδώ —
-    # το bipolar montage είναι το ίδιο reference
+    raw.set_montage(montage, match_case=False, on_missing="ignore")
 
     raw.filter(
         l_freq=l_freq, h_freq=h_freq,
-        method='fir', fir_design='firwin',
-        phase='zero', verbose="ERROR",
+        method="fir", fir_design="firwin",
+        phase="zero", verbose="ERROR",
     )
 
     raw.resample(80, verbose="ERROR")
 
-    bad_chs = mark_and_interpolate_bad_channels(  # πρώτα bad channels
-        raw, high_factor=high_factor,
-        low_factor=low_factor, plot=False,
+    # Bad channels driven by the pre-computed report —
+    # only deviation / correlation / ransac, hf_noise is skipped
+    bad_chs = mark_and_interpolate_bad_channels_from_report(
+        raw, edf_basename, report, plot=False,
     )
 
-    raw.set_eeg_reference('average', verbose="ERROR")
+    # Average reference is applied AFTER interpolation so that
+    # the bad channels do not contaminate the reference signal
+    raw.set_eeg_reference("average", verbose="ERROR")
 
     data = raw.get_data()
-    ch_names = np.array(raw.ch_names, dtype=object)  # <-- 19 κανάλια
-    sfreq = float(raw.info['sfreq'])
+    ch_names = np.array(raw.ch_names, dtype=object)
+    sfreq = float(raw.info["sfreq"])
     annotations = raw.annotations
 
     epochs, labels, center_sec, center_hmsms = create_annotation_centered_epochs(
@@ -225,3 +246,16 @@ def preprocess_edf_to_windows(
     )
 
 
+
+if __name__ == "__main__":
+    REPORT_PATH = Path("channel_detection_details.txt")
+    report = parse_channel_detection_report(REPORT_PATH)
+
+    print(f"Parsed {len(report)} EDF entries")
+    for base, cats in report.items():
+        to_interp = channels_to_interpolate(cats)
+        skipped_hf = sorted(set(cats["hf_noise"]) - set(to_interp))
+        print(f"  {base}")
+        print(f"    interpolate: {to_interp}")
+        if skipped_hf:
+            print(f"    skipped (hf_noise only): {skipped_hf}")

@@ -2,7 +2,10 @@
 from pathlib import Path
 import re
 import numpy as np
-import preprocessing  # imports preprocess_edf_to_windows from preprocessing.py
+import preprocessing  # imports preprocess_edf_to_windows + parse_channel_detection_report
+
+
+REPORT_PATH = Path("../../../data/channel_detection_details.txt")
 
 
 def patient_id_from_filename(filename: str):
@@ -11,15 +14,19 @@ def patient_id_from_filename(filename: str):
 
 
 def main():
-    data_dir = Path("../data")
-    out_dir = data_dir / "windows_cache_80hz"
+    data_dir = Path("../../../data")
+    out_dir = data_dir / "windows_cache_80hz_pyprep"
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Parse the PyPREP report once; preprocess_edf_to_windows needs it for every file
+    report = preprocessing.parse_channel_detection_report(REPORT_PATH)
+    print(f"Loaded PyPREP report with {len(report)} entries")
 
     edf_files = sorted(data_dir.glob("*.edf"))
 
-    # "before P28" => keep Pxx < 28
+    # Drop patient P28 (TODO: revisit if we want to include them later)
     selected = []
-    for p in edf_files:  ## ayto na to allaksw meta eksairei to arxeio 28
+    for p in edf_files:
         pid = patient_id_from_filename(p.name)
         if pid is None:
             continue
@@ -33,10 +40,9 @@ def main():
 
         windows, labels, center_sec, center_hmsms, sfreq, ch_names, bad_chs = preprocessing.preprocess_edf_to_windows(
             edf_path=str(edf_path),
+            report=report,
             l_freq=0.5,
             h_freq=40.0,
-            high_factor=8.0,
-            low_factor=10.0,
             positive_label="*",
             negative_label="-",
         )

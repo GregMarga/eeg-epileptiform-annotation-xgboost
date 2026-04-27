@@ -33,6 +33,7 @@ FEATURE_NAMES_16 = [
     "norm_band_alpha",
     "norm_band_beta",
 ]
+
 # -------------------------------------------------
 # Helpers
 # -------------------------------------------------
@@ -46,14 +47,24 @@ def patient_from_filename(name: str) -> str | None:
     return m.group(1).upper() if m else None
 
 
+def zscore_per_patient(X: np.ndarray, eps: float = 1e-14) -> np.ndarray:
+    """
+    Per-patient z-score: each feature is centered around 0 and scaled
+    using the mean/std computed from THIS patient's windows only.
+    Constant features become ~0 instead of NaN thanks to the epsilon.
+    """
+    mean = X.mean(axis=0, keepdims=True)
+    std = X.std(axis=0, keepdims=True)
+    return (X - mean) / (std + eps)
+
+
 def load_features(npz_path: Path):
     z = np.load(npz_path, allow_pickle=True)
-    # print(z["feature_names"])
     X = z["X"].astype(np.float32)
     n_channels = len(z["ch_names"])
     n_samples = X.shape[0]
     X = X.reshape(n_samples, n_channels, 16)   # (samples, channels, features_per_channel)
-    X_avg = X.mean(axis=1)             # (samples, 16) average feature per channel
+    X_avg = X.mean(axis=1)                     # (samples, 16) average feature across channels
 
     y = z["y"].astype(np.uint8).ravel()
     center_sec = z["center_sec"].astype(np.float64)
@@ -81,9 +92,17 @@ def build_patient_index(in_dir: Path) -> dict[str, list[Path]]:
     return patient_files
 
 
-def concat_patient_files(
-        file_list: list[Path]
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, list[str]]:
+def load_patient_features(
+        file_list: list[Path],
+        normalize: bool = True,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Concatenate all recordings of ONE patient and (optionally) apply
+    per-patient z-score on the pooled feature matrix.
+
+    The z-score uses THIS patient's stats only — no leakage across patients
+    in either direction (train→test or test→train).
+    """
     xs, ys, cs, ch, edfs = [], [], [], [], []
 
     for f in file_list:
@@ -92,20 +111,21 @@ def concat_patient_files(
         ys.append(y)
         cs.append(center_sec)
         ch.append(center_hmsms)
-
         edfs.extend([source_edf] * len(y))
 
-    return (
-        np.concatenate(xs, axis=0),
-        np.concatenate(ys, axis=0),
-        np.concatenate(cs, axis=0),
-        np.concatenate(ch, axis=0),
-        np.array(edfs, dtype=object),
-    )
+    X = np.concatenate(xs, axis=0)
+    y = np.concatenate(ys, axis=0)
+    cs = np.concatenate(cs, axis=0)
+    ch = np.concatenate(ch, axis=0)
+    edfs = np.array(edfs, dtype=object)
+
+    if normalize:
+        X = zscore_per_patient(X)
+
+    return X, y, cs, ch, edfs
 
 
-def train_xgb(x_train: np.ndarray, y_train: np.ndarray) -> XGBClassifier:
-    # handle class imbalance (in case train split is not perfectly balanced)
+def train_xgb(x_train: np.ndarray, y_train: np.ndarray) -> tuple[XGBClassifier, dict]:
     pos = int(y_train.sum())
     neg = int((y_train == 0).sum())
     scale_pos_weight = (neg / pos) if pos > 0 else 1.0
@@ -126,31 +146,24 @@ def train_xgb(x_train: np.ndarray, y_train: np.ndarray) -> XGBClassifier:
     model.fit(x_train, y_train)
     score = model.get_booster().get_score(importance_type="gain")
 
-
-    return model,score
+    return model, score
 
 
 def safe_roc_auc(y_true: np.ndarray, y_proba: np.ndarray) -> float:
-    # roc_auc needs both classes present
     if len(np.unique(y_true)) < 2:
         return float("nan")
     return float(roc_auc_score(y_true, y_proba))
 
 
 def sec_to_hmsms(sec: float) -> str:
-    """
-    Convert seconds to HH:MM:SS.mmm
-    """
     hours = int(sec // 3600)
     minutes = int((sec % 3600) // 60)
     seconds = int(sec % 60)
     millis = int((sec - int(sec)) * 1000)
-
     return f"{hours:02d}:{minutes:02d}:{seconds:02d}.{millis:03d}"
 
 
 def safe_pr_auc(y_true: np.ndarray, y_proba: np.ndarray) -> float:
-    # average_precision also benefits from both classes; if only one class, it's degenerate
     if len(np.unique(y_true)) < 2:
         return float("nan")
     return float(average_precision_score(y_true, y_proba))
@@ -189,60 +202,6 @@ def summarize_metric(values: list[float]) -> tuple[float, float]:
     return float(np.nanmean(a)), float(np.nanstd(a))
 
 
-def save_hard_errors_csv(
-    out_csv: Path,
-    y_true: np.ndarray,
-    y_proba: np.ndarray,
-    center_sec: np.ndarray,
-    center_hmsms: np.ndarray,
-    source_edf: np.ndarray,
-    thr: float,
-    top_k: int = 5,
-):
-    y_pred = (y_proba >= thr).astype(np.uint8)
-
-    idx = np.arange(len(y_true))
-
-    fp_idx = idx[(y_true == 0) & (y_pred == 1)]
-    fp_sorted = fp_idx[np.argsort(y_proba[fp_idx])[::-1]]
-    fp_top = fp_sorted[:top_k]
-
-    fn_idx = idx[(y_true == 1) & (y_pred == 0)]
-    fn_sorted = fn_idx[np.argsort(y_proba[fn_idx])]
-    fn_top = fn_sorted[:top_k]
-
-    out_csv.parent.mkdir(parents=True, exist_ok=True)
-    with out_csv.open("w", newline="") as f:
-        w = csv.writer(f)
-        w.writerow([
-            "error_type",
-            "window_center_time",
-            "y_true",
-            "y_pred",
-            "y_proba",
-            "recording_file",
-        ])
-
-        for i in fp_top:
-            w.writerow([
-                "false_positive",
-                sec_to_hmsms(center_sec[i]),
-                int(y_true[i]),
-                int(y_pred[i]),
-                f"{float(y_proba[i]):.8f}",
-                source_edf[i],
-            ])
-
-        for i in fn_top:
-            w.writerow([
-                "false_negative",
-                sec_to_hmsms(center_sec[i]),
-                int(y_true[i]),
-                int(y_pred[i]),
-                f"{float(y_proba[i]):.8f}",
-                source_edf[i],
-            ])
-
 def print_feature_stats(X: np.ndarray, feature_names: list[str], title: str = "Feature stats"):
     means = X.mean(axis=0)
     stds = X.std(axis=0)
@@ -250,71 +209,81 @@ def print_feature_stats(X: np.ndarray, feature_names: list[str], title: str = "F
     print(f"\n=== {title} ===")
     for name, mu, sigma in zip(feature_names, means, stds):
         print(f"{name:20s} mean={mu:12.6e}  std={sigma:12.6e}")
+
+
 # -------------------------------------------------
-# LOPO CV
+# LOPO CV with per-patient normalization
 # -------------------------------------------------
 
 def main():
-    in_dir = Path("../data/80hz_freq_time_features_cache_basic")
+    in_dir = Path("../../../data/80hz_freq_time_features_cache_basic")
     patient_files = build_patient_index(in_dir)
     patients = sorted(patient_files.keys())
 
     print(f"Patients: {patients} (n={len(patients)})")
 
-    thr = 0.5  # fixed threshold for classification metrics
+    # Toggle per-patient z-score on/off here
+    NORMALIZE_PER_PATIENT = True
 
+    thr = 0.5
     fold_metrics: dict[str, dict[str, float]] = {}
-    # store arrays for summary
     keys = ["acc", "bacc", "f1", "precision", "recall", "roc_auc", "pr_auc"]
     collected = {k: [] for k in keys}
-
-    # aggregate confusion counts across folds
     agg = {"tp": 0.0, "fp": 0.0, "tn": 0.0, "fn": 0.0}
 
+    # Sanity print: pooled feature stats AFTER per-patient z-score should
+    # be ~0 mean / ~1 std for every feature
     all_x = []
     for pid in patients:
-        x, y, _, _, _ = concat_patient_files(patient_files[pid])
+        x, _, _, _, _ = load_patient_features(
+            patient_files[pid], normalize=NORMALIZE_PER_PATIENT
+        )
         all_x.append(x)
-
     X_all = np.concatenate(all_x, axis=0)
-    print_feature_stats(X_all, FEATURE_NAMES_16, title="All dataset feature stats")
+    print_feature_stats(
+        X_all, FEATURE_NAMES_16,
+        title=f"All dataset feature stats (normalize={NORMALIZE_PER_PATIENT})",
+    )
 
     n_features = len(FEATURE_NAMES_16)
     all_importances = []
+
     for test_pid in patients:
         train_pids = [p for p in patients if p != test_pid]
 
+        # Train: each patient is normalized using ITS OWN stats, then concatenated
         x_train_list, y_train_list = [], []
         for pid in train_pids:
-            x, y, _, _, _ = concat_patient_files(patient_files[pid])
+            x, y, _, _, _ = load_patient_features(
+                patient_files[pid], normalize=NORMALIZE_PER_PATIENT
+            )
             x_train_list.append(x)
             y_train_list.append(y)
 
         x_train = np.concatenate(x_train_list, axis=0)
         y_train = np.concatenate(y_train_list, axis=0)
 
-        x_test, y_test, center_sec_test, center_hmsms_test, source_edf_test = concat_patient_files(
-            patient_files[test_pid]
+        # Test: same logic — normalize using the test patient's own stats
+        # (no leakage from train, no leakage from test into train)
+        x_test, y_test, center_sec_test, center_hmsms_test, source_edf_test = load_patient_features(
+            patient_files[test_pid], normalize=NORMALIZE_PER_PATIENT
         )
 
-        model,score = train_xgb(x_train, y_train)
+        model, score = train_xgb(x_train, y_train)
 
         imp_vec = np.zeros(n_features)
-
         for k, v in score.items():
-            idx = int(k[1:])  # "f6" → 6
+            idx = int(k[1:])
             imp_vec[idx] = v
-
         all_importances.append(imp_vec)
 
         y_proba = model.predict_proba(x_test)[:, 1]
-        # metrics
+
         m = evaluate_fold(y_test, y_proba, thr=thr)
         fold_metrics[test_pid] = m
 
         for k in keys:
             collected[k].append(m[k])
-
         for c in ["tp", "fp", "tn", "fn"]:
             agg[c] += m[c]
 
@@ -325,14 +294,15 @@ def main():
             f"prec={m['precision']:.3f} rec={m['recall']:.3f} "
             f"roc_auc={m['roc_auc']:.3f} pr_auc={m['pr_auc']:.3f}"
         )
-    all_importances = np.array(all_importances)  # (n_folds, n_features)
 
+    all_importances = np.array(all_importances)
     mean_imp = all_importances.mean(axis=0)
     std_imp = all_importances.std(axis=0)
 
     print("\n=== Feature importance across LOPO folds (gain) ===")
     for name, mu, sigma in zip(FEATURE_NAMES_16, mean_imp, std_imp):
         print(f"{name:20s} mean={mu:6.4f}  std={sigma:6.4f}")
+
     print("\n=== LOPO summary (mean ± std across patients) ===")
     for k in keys:
         mean, std = summarize_metric(collected[k])
@@ -341,7 +311,6 @@ def main():
     print("\n=== Aggregate confusion (sum across folds, at thr=0.5) ===")
     print(f"TP={int(agg['tp'])}  FP={int(agg['fp'])}  TN={int(agg['tn'])}  FN={int(agg['fn'])}")
 
-    # Optional: identify worst patients by F1
     worst = sorted(fold_metrics.items(), key=lambda kv: kv[1]["f1"])[:5]
     print("\nWorst by F1:")
     for pid, m in worst:
@@ -350,44 +319,26 @@ def main():
     # -----------------------------
     # Bar plot: Accuracy per patient
     # -----------------------------
-    # Patient-level pattern mapping (from metadata table)
     patient_pattern = {
-        "P20": "LPD",
-        "P28": "LPD",
-        "P36": "LPD",
-        "P48": "GPD",
-        "P49": "GPD",
-        "P54": "GPD",
-        "P55": "LRDA",
-        "P58": "LPD",
-        "P70": "GPD",
-        "P73": "LPD",
+        "P20": "LPD", "P28": "LPD", "P36": "LPD",
+        "P48": "GPD", "P49": "GPD", "P54": "GPD",
+        "P55": "LRDA", "P58": "LPD", "P70": "GPD", "P73": "LPD",
     }
-    pattern_colors = {
-        "LPD": "tab:blue",
-        "GPD": "tab:orange",
-        "LRDA": "tab:green",
-    }
-    # sort patients by accuracy
-    items = sorted(fold_metrics.items(), key=lambda kv: kv[1]["acc"])
+    pattern_colors = {"LPD": "tab:blue", "GPD": "tab:orange", "LRDA": "tab:green"}
 
+    items = sorted(fold_metrics.items(), key=lambda kv: kv[1]["acc"])
     pids = [pid for pid, _ in items]
     accs = [m["acc"] for _, m in items]
-
-    colors = [
-        pattern_colors.get(patient_pattern.get(pid, "UNK"), "gray")
-        for pid in pids
-    ]
+    colors = [pattern_colors.get(patient_pattern.get(pid, "UNK"), "gray") for pid in pids]
 
     plt.figure(figsize=(10, 4))
     plt.bar(pids, accs, color=colors)
     plt.ylim(0.0, 1.0)
     plt.ylabel("Accuracy")
     plt.xlabel("Patient (sorted)")
-    plt.title("LOPO Accuracy per Patient (colored by PD pattern)")
+    plt.title(f"LOPO Accuracy per Patient — per-patient z-score = {NORMALIZE_PER_PATIENT}")
     plt.grid(axis="y", alpha=0.3)
 
-    # legend (manual)
     from matplotlib.patches import Patch
     legend_elems = [
         Patch(facecolor="tab:blue", label="LPD"),
