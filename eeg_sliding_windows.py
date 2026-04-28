@@ -7,61 +7,24 @@ from scipy.signal import welch
 from tqdm import tqdm
 
 
-def detect_bad_channels_by_std(
-        raw: mne.io.BaseRaw,
-        high_factor: float = 8.0,
-        low_factor: float = 10.0,
-):
-    # find outlier (bad) channels based on std
+# -----------------------------
+# Bad channels for this specific recording (from PyPREP report)
+# Only deviation / correlation / ransac are interpolated; hf_noise is ignored.
+# Report for P70_GHB_M1679_0000078_fixed.edf:
+#   hf_noise    : ['Fp2']
+#   correlation : ['Fp2', 'F8']
+# Channels to interpolate: Fp2 (correlation) + F8 (correlation) = ['Fp2', 'F8']
+# -----------------------------
+EDF_NAME = "P70_GHB_M1679_0000078_fixed"
+EDF_PATH = f"../../../data/{EDF_NAME}.edf"
+BAD_CHANNELS_TO_INTERPOLATE = ["Fp2", "F8"]
 
-    data = raw.get_data()  # shape: (n_channels, n_samples)
-    stds = data.std(axis=1)  # std per channel
-    median_std = np.median(stds)
-
-    high_threshold = median_std * high_factor
-    low_threshold = median_std / low_factor
-
-    bad_high = np.where(stds > high_threshold)[0]  # too noisy eg electrode pop artifacts
-    bad_low = np.where(stds < low_threshold)[0]  # dead channel
-
-    bad_idx = np.unique(np.concatenate([bad_high, bad_low]))
-    bad_channels = [raw.ch_names[i] for i in bad_idx]
-
-    return bad_channels, stds
+TARGET_SFREQ = 80.0   # downsample target — matches the trained model's pipeline
 
 
-def mark_and_interpolate_bad_channels(
-        raw: mne.io.BaseRaw,
-        high_factor: float = 8.0,
-        low_factor: float = 10.0,
-        plot: bool = False,
-):
-    bad_channels, stds = detect_bad_channels_by_std(
-        raw,
-        high_factor=high_factor,
-        low_factor=low_factor,
-    )
-
-    # print("STD per channel:")
-    # for name, s in zip(raw.ch_names, stds):
-    #     print(f"{name}: {s:.3e}")
-    # print("Detected bad channels:", bad_channels)
-
-    # Mark as bad
-    raw.info['bads'] = bad_channels
-
-    # Spatial interpolation
-    if len(bad_channels) > 0:
-        raw.interpolate_bads(reset_bads=True)
-        # print("Interpolated bad channels.")
-    # else:
-    #     print("No bad channels detected, nothing to interpolate.")
-
-    if plot:
-        raw.plot(scalings='auto', block=True)
-
-    return bad_channels
-
+# -----------------------------
+# Sliding windows
+# -----------------------------
 
 def create_sliding_epochs(
         data,
@@ -74,7 +37,6 @@ def create_sliding_epochs(
     step = int(round(step_size * sfreq / 1000))
 
     epochs = []
-
     for start in range(0, last_start + 1, step):
         epoch = data[:, start:start + sample_window]
         epochs.append(epoch)
@@ -84,47 +46,49 @@ def create_sliding_epochs(
 def create_sliding_windows_from_eeg(
         l_freq: float = 0.5,
         h_freq: float = 40.0,
-        high_factor: float = 8.0,
-        low_factor: float = 10.0,
 ):
+    raw = mne.io.read_raw_edf(EDF_PATH, preload=True)
 
-    raw = mne.io.read_raw_edf(
-        "../../../data/P70_GHB_M1679_0000078.edf",
-        preload=True
-    )
+    # Clean channel names
+    raw.rename_channels(lambda ch: ch.replace("EEG ", "").strip())
 
-    # clean channel names
-    raw.rename_channels(lambda ch: ch.replace('EEG ', '').strip())
-
-    # montage
+    # Standard 10-20 montage (needed for spatial interpolation)
     montage = make_standard_montage("standard_1020")
-    raw.set_montage(montage, match_case=False, on_missing='ignore')
+    raw.set_montage(montage, match_case=False, on_missing="ignore")
 
-    # average reference
-    raw.set_eeg_reference('average', verbose="ERROR")
-
-    # filter
+    # Bandpass filter
     raw.filter(
         l_freq=l_freq,
         h_freq=h_freq,
-        method='fir',
-        fir_design='firwin',
-        phase='zero',
+        method="fir",
+        fir_design="firwin",
+        phase="zero",
         verbose="ERROR",
     )
 
-    # bad channels detection + interpolation (your existing function)
-    bad_chs = mark_and_interpolate_bad_channels(
-        raw,
-        high_factor=high_factor,
-        low_factor=low_factor,
-        plot=False,
-    )
+    # Downsample to target sfreq (80 Hz) for speed and to match the
+    # training pipeline. Done AFTER the lowpass filter so we are above
+    # the Nyquist limit for the new rate.
+    raw.resample(TARGET_SFREQ, verbose="ERROR")
+
+    # Hardcoded bad channels from PyPREP report — interpolate only those
+    # in deviation / correlation / ransac (hf_noise alone is skipped).
+    bad_chs = [ch for ch in BAD_CHANNELS_TO_INTERPOLATE if ch in raw.ch_names]
+    if bad_chs:
+        raw.info["bads"] = bad_chs
+        raw.interpolate_bads(reset_bads=True)
+        print(f"Interpolated bad channels: {bad_chs}")
+    else:
+        print("No bad channels to interpolate.")
+
+    # Average reference AFTER interpolation, so the bad channels do not
+    # contaminate the reference signal.
+    raw.set_eeg_reference("average", verbose="ERROR")
 
     data = raw.get_data()
-    sfreq = float(raw.info['sfreq'])
+    sfreq = float(raw.info["sfreq"])
     ch_names = np.array(raw.ch_names, dtype=object)
-    print(data.shape)
+    print(f"Data shape: {data.shape}, sfreq={sfreq}")
 
     epochs = create_sliding_epochs(data=data, sfreq=sfreq)
     return (
@@ -134,6 +98,10 @@ def create_sliding_windows_from_eeg(
         np.array(bad_chs, dtype=object),
     )
 
+
+# -----------------------------
+# Time-domain feature primitives
+# -----------------------------
 
 def zero_crossings(x: np.ndarray) -> int:
     return int(np.sum((x[:-1] * x[1:]) < 0))
@@ -159,7 +127,6 @@ def feature_names(ch_names: np.ndarray) -> list[str]:
         "skew",
         "kurt_excess",
     ]
-
     per_ch_freq = [
         "total_power_1_40",
         "peak_freq_1_40",
@@ -172,7 +139,6 @@ def feature_names(ch_names: np.ndarray) -> list[str]:
         "norm_band_alpha",
         "norm_band_beta",
     ]
-
     names = []
     for ch in ch_names:
         for f in per_ch_time:
@@ -181,6 +147,10 @@ def feature_names(ch_names: np.ndarray) -> list[str]:
             names.append(f"{ch}_{f}")
     return names
 
+
+# -----------------------------
+# Frequency-domain feature primitives
+# -----------------------------
 
 def compute_welch_psd_1d(
         x: np.ndarray,
@@ -245,7 +215,7 @@ def freq_features_1d(
         "delta": (1.0, 3.0),
         "theta": (4.0, 8.0),
         "alpha": (9.0, 13.0),
-        "beta": (14.0, 20.0),
+        "beta":  (14.0, 20.0),
     }
 
     f, psd = compute_welch_psd_1d(x, fs=fs, nperseg=nperseg, noverlap=noverlap)
@@ -296,19 +266,17 @@ def extract_features_for_one_window(window_2d: np.ndarray, fs: float) -> np.ndar
 
 
 def process_np_windows_one_patient(windows, sfreq: float, ch_names, out_dir: Path):
-    edf_name = "P70_GHB_M1679_0000078"
-
-    n_windows, n_ch, _ = windows.shape
+    n_windows = windows.shape[0]
     fnames = feature_names(ch_names)
     n_feat = len(fnames)
 
     X = np.empty((n_windows, n_feat), dtype=np.float32)
 
-    for i in tqdm(range(n_windows), desc=f"Extracting features ({edf_name})"):
+    for i in tqdm(range(n_windows), desc=f"Extracting features ({EDF_NAME})"):
         X[i] = extract_features_for_one_window(windows[i], sfreq)
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / f"{edf_name}_full_features.npz"
+    out_path = out_dir / f"{EDF_NAME}_full_features.npz"
 
     np.savez_compressed(
         out_path,
@@ -316,23 +284,21 @@ def process_np_windows_one_patient(windows, sfreq: float, ch_names, out_dir: Pat
         sfreq=float(sfreq),
         ch_names=np.array(ch_names, dtype=object),
         feature_names=np.array(fnames, dtype=object),
-        source_edf=str(edf_name),
+        source_edf=str(EDF_NAME),
     )
 
     print(f"Saved: {out_path} | X={X.shape}")
 
 
 def main():
-    out_dir = Path("../testP70/features_cache_basic")
-
     epochs, sfreq, ch_names, bad_chs = create_sliding_windows_from_eeg(
-        l_freq=0.5, h_freq=40.0, high_factor=8.0, low_factor=10.0,
+        l_freq=0.5, h_freq=40.0,
     )
 
     windows_out = Path("../testP70/windows_cache")
     windows_out.mkdir(parents=True, exist_ok=True)
 
-    windows_path = windows_out / "P70_GHB_M1679_0000078_full_windows.npz"
+    windows_path = windows_out / f"{EDF_NAME}_full_windows.npz"
 
     np.savez_compressed(
         windows_path,
@@ -340,18 +306,17 @@ def main():
         sfreq=float(sfreq),
         ch_names=np.array(ch_names, dtype=object),
         bad_chs=np.array(bad_chs, dtype=object),
-        source_edf="P70_GHB_M1679_0000078",
+        source_edf=EDF_NAME,
     )
 
     print(f"Saved windows: {windows_path} | windows={epochs.shape}")
-
     print(f"Created sliding windows: {len(epochs)}")
 
     # process_np_windows_one_patient(
     #     windows=epochs,
     #     sfreq=sfreq,
     #     ch_names=ch_names,
-    #     out_dir=out_dir,
+    #     out_dir=Path("../testP70/features_cache"),
     # )
 
 
