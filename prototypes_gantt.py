@@ -16,14 +16,13 @@ import numpy as np
 import matplotlib.pyplot as plt
 import mne
 
-
 # -------------------------------------------------
 # Config
 # -------------------------------------------------
 
 EDF_PATH = Path("../../../data/extra_data/P70_GHB_M1679_0000078.edf")
-CSV_PATH = Path("../../../data/P70_5shot_predictions.csv")
-OUT_PNG  = Path("../../../data/P70_timeline.png")
+CSV_PATH = Path("../../../data/P70_5shot_predictions_labram.csv")
+OUT_PNG = Path("../../../data/P70_timeline_labram.png")
 
 # Sliding window timing — must match the script that produced the CSV
 WIN_SEC = 0.5
@@ -52,7 +51,7 @@ def load_predictions(csv_path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray
     order = np.argsort(indices)
     return (
         np.array(indices, dtype=int)[order],
-        np.array(preds,   dtype=np.uint8)[order],
+        np.array(preds, dtype=np.uint8)[order],
         np.array(centers, dtype=float)[order],
     )
 
@@ -83,11 +82,11 @@ def pd_intervals_from_annotations(ann: mne.Annotations) -> np.ndarray:
 
 
 def label_windows_by_overlap(
-    n_windows: int,
-    win_sec: float,
-    hop_sec: float,
-    intervals: np.ndarray,
-    min_overlap_sec: float = 0.0,
+        n_windows: int,
+        win_sec: float,
+        hop_sec: float,
+        intervals: np.ndarray,
+        min_overlap_sec: float = 0.0,
 ) -> np.ndarray:
     """For each window, 1 if it overlaps any PD interval by more than min_overlap_sec."""
     starts = np.arange(n_windows, dtype=float) * hop_sec
@@ -158,9 +157,9 @@ def main():
     y_true_b = y_true.astype(bool)
     y_pred_b = y_pred.astype(bool)
 
-    tp_mask = (y_true_b &  y_pred_b)
-    fp_mask = (~y_true_b &  y_pred_b)
-    fn_mask = (y_true_b  & ~y_pred_b)
+    tp_mask = (y_true_b & y_pred_b)
+    fp_mask = (~y_true_b & y_pred_b)
+    fn_mask = (y_true_b & ~y_pred_b)
 
     # Counts
     n_tp = int(tp_mask.sum())
@@ -170,8 +169,8 @@ def main():
     n_pos_true = int(y_true_b.sum())
 
     print(f"\nWindow-level counts:")
-    print(f"  GT positives:  {n_pos_true} / {n_windows} ({100.0*n_pos_true/n_windows:.2f}%)")
-    print(f"  Predicted=1:   {n_pos_pred} / {n_windows} ({100.0*n_pos_pred/n_windows:.2f}%)")
+    print(f"  GT positives:  {n_pos_true} / {n_windows} ({100.0 * n_pos_true / n_windows:.2f}%)")
+    print(f"  Predicted=1:   {n_pos_pred} / {n_windows} ({100.0 * n_pos_pred / n_windows:.2f}%)")
     print(f"  TP={n_tp}  FP={n_fp}  FN={n_fn}")
 
     if n_pos_true > 0:
@@ -226,7 +225,7 @@ def main():
     ax.set_yticklabels(["FP", "TP", "GT", "FN"])
     ax.set_xlabel("Time (sec)")
     ax.set_title(
-        f"P70 — 5-shot prototypical predictions vs PD ground truth"
+        f"P70 combined— 5-shot prototypical predictions vs PD ground truth"
     )
     ax.grid(True, axis="x", alpha=0.3)
     ax.legend(loc="upper right", fontsize=9)

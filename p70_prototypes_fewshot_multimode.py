@@ -3,13 +3,18 @@ Few-shot calibration on P70 with selectable feature mode.
 
 Three feature modes (set FEATURE_MODE below):
   - "handcrafted":  16 HC features averaged over channels
+                    Window 0.5s, hop 0.25s.
   - "labram":       LaBraM embeddings per window
-  - "combined":     concat of (z-scored HC) and (z-scored LaBraM)
+                    Window 1.0s, hop 0.25s.
+  - "combined":     concat of (z-scored HC) and (z-scored LaBraM), aligned
+                    by window CENTER. HC window k_hc and LaBraM window k_lb
+                    share the same center when k_hc = k_lb + 1, i.e. the HC
+                    side is shifted by one hop. The aligned stream uses the
+                    LaBraM center as the canonical timestamp.
 
-LaBraM files are plain .npy arrays (no labels stored). Labels for the
-labeled LaBraM set are taken from the labeled HC .npz, which assumes the
-two labeled files were produced from the same windows in the same order.
-A length check enforces that.
+LaBraM labeled file is .npz (carries embeddings; labels come from the HC
+labeled .npz under the assumption the labeled sets are window-aligned —
+which holds for annotation-centered windows of matching count).
 
 Output:
   CSV named with the feature mode, e.g. P70_5shot_predictions_combined.csv
@@ -40,14 +45,17 @@ SLIDING_LABRAM = Path("../../../data/labram_sliding_embs_1s_75overlap/embeddings
 
 CSV_DIR = Path("../../../data")
 
-# Sliding window timing (must match the script that produced the sliding cache)
-WIN_MS  = 500.0
-HOP_MS  = 250.0
+# Per-modality sliding window timing (must match the producing scripts)
+HC_WIN_MS  = 500.0
+HC_HOP_MS  = 250.0
+
+LABRAM_WIN_MS = 1000.0
+LABRAM_HOP_MS = 250.0
 
 # Few-shot config
 N_SHOT = 5
 RANDOM_SEED = 42
-THRESHOLD = 0.5
+THRESHOLD = 0.7
 DISTANCE = "euclidean"     # "euclidean" or "cosine"
 
 
@@ -56,11 +64,6 @@ DISTANCE = "euclidean"     # "euclidean" or "cosine"
 # -------------------------------------------------
 
 def _load_array(path: Path, key: str = "X") -> np.ndarray:
-    """Load an array regardless of whether the file is .npy or .npz.
-
-    For .npz: returns the value under `key` if present, else the first array.
-    For .npy: returns the array directly.
-    """
     obj = np.load(path, allow_pickle=True)
     if hasattr(obj, "files"):  # NpzFile
         if key in obj.files:
@@ -70,17 +73,10 @@ def _load_array(path: Path, key: str = "X") -> np.ndarray:
 
 
 def _flatten_labram(X: np.ndarray) -> np.ndarray:
-    """Ensure LaBraM embeddings are 2D: (N, D).
-
-    If the array is 3D — e.g. (N, n_patches, D) or (N, n_channels, D) — mean
-    pool over the middle dimension. If higher rank, mean pool over all dims
-    except the first and the last.
-    """
     if X.ndim == 2:
         return X
     if X.ndim == 3:
         return X.mean(axis=1)
-    # Generic fallback: keep N and D, average the rest.
     return X.reshape(X.shape[0], -1, X.shape[-1]).mean(axis=1)
 
 
@@ -89,81 +85,154 @@ def _flatten_labram(X: np.ndarray) -> np.ndarray:
 # -------------------------------------------------
 
 def load_handcrafted_labeled(path: Path) -> tuple[np.ndarray, np.ndarray]:
-    """Labeled HC: reduce per-channel features to 16 by averaging over channels."""
     z = np.load(path, allow_pickle=True)
     X = z["X"].astype(np.float32)
     n_channels = len(z["ch_names"])
     n_samples = X.shape[0]
-    X = X.reshape(n_samples, n_channels, -1).mean(axis=1)  # (N, 16)
+    X = X.reshape(n_samples, n_channels, -1).mean(axis=1)
     y = z["y"].astype(np.uint8).ravel()
     return X, y
 
 
 def load_handcrafted_sliding(path: Path) -> np.ndarray:
-    """Unlabeled HC sliding: same channel-averaging as the labeled side."""
     z = np.load(path, allow_pickle=True)
     X = z["X"].astype(np.float32)
     n_channels = len(z["ch_names"])
     n_samples = X.shape[0]
-    X = X.reshape(n_samples, n_channels, -1).mean(axis=1)  # (N, 16)
+    X = X.reshape(n_samples, n_channels, -1).mean(axis=1)
     return X
 
 
 def load_labram_labeled(path: Path) -> np.ndarray:
-    """Labeled LaBraM (.npy): one embedding per window, labels come from HC."""
     X = _load_array(path).astype(np.float32)
-    X = _flatten_labram(X)
-    return X
+    return _flatten_labram(X)
 
 
 def load_labram_sliding(path: Path) -> np.ndarray:
-    """Sliding LaBraM (.npy): one embedding per window, no labels."""
     X = _load_array(path).astype(np.float32)
-    X = _flatten_labram(X)
-    return X
+    return _flatten_labram(X)
 
+
+# -------------------------------------------------
+# Center alignment for combined sliding
+# -------------------------------------------------
+
+def align_sliding_by_center(
+    X_hc: np.ndarray,
+    X_lb: np.ndarray,
+    hc_win_ms: float, hc_hop_ms: float,
+    lb_win_ms: float, lb_hop_ms: float,
+    tol_ms: float = 1e-6,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Match HC and LaBraM windows by shared center time.
+
+    HC center for index i :  i*hc_hop + hc_win/2
+    LB center for index j :  j*lb_hop + lb_win/2
+
+    With matching hops (the only case we expect here), the offset between the
+    indices is constant:
+        j - i = (hc_win - lb_win) / (2 * hop)
+
+    For HC=500ms, LB=1000ms, hop=250ms  ->  j - i = -1, i.e. HC index is
+    one hop ahead of LaBraM index for the same center.
+
+    Returns (X_hc_aligned, X_lb_aligned, common_center_sec) with equal length.
+    """
+    if abs(hc_hop_ms - lb_hop_ms) > tol_ms:
+        raise ValueError(
+            f"Hop sizes differ ({hc_hop_ms} vs {lb_hop_ms}) — center alignment "
+            f"would not produce a constant index offset. Re-extract one of the "
+            f"streams with a matching hop."
+        )
+
+    hop_ms = hc_hop_ms
+    # j - i = (hc_win - lb_win) / (2 * hop)
+    diff_ms = (hc_win_ms - lb_win_ms) / 2.0
+    if abs(diff_ms / hop_ms - round(diff_ms / hop_ms)) > 1e-6:
+        raise ValueError(
+            f"Window centers do not land on a common grid: "
+            f"(hc_win - lb_win)/2 = {diff_ms} ms is not a multiple of hop "
+            f"{hop_ms} ms."
+        )
+    offset = int(round(diff_ms / hop_ms))   # j - i
+    # Equivalently: lb index j corresponds to hc index i = j - offset
+
+    n_hc = len(X_hc)
+    n_lb = len(X_lb)
+
+    # Valid lb indices j must satisfy 0 <= j - offset < n_hc and 0 <= j < n_lb
+    j_lo = max(0, offset)
+    j_hi = min(n_lb, n_hc + offset)  # exclusive
+    if j_hi <= j_lo:
+        raise ValueError("No overlap between HC and LaBraM after center alignment.")
+
+    j_range = np.arange(j_lo, j_hi)
+    i_range = j_range - offset
+
+    X_hc_aligned = X_hc[i_range]
+    X_lb_aligned = X_lb[j_range]
+
+    # Canonical timestamp: the LaBraM center (which equals the HC center).
+    centers_sec = (j_range * lb_hop_ms + 0.5 * lb_win_ms) / 1000.0
+
+    return X_hc_aligned, X_lb_aligned, centers_sec
+
+
+# -------------------------------------------------
+# Top-level feature loader
+# -------------------------------------------------
 
 def load_features(mode: str):
-    """Returns (X_labeled_blocks, y_labeled, X_query_blocks).
+    """Returns (X_labeled_blocks, y_labeled, X_query_blocks, query_centers_sec).
 
-    Labels always come from the HC labeled file. For the LaBraM and combined
-    modes we check that the LaBraM labeled length matches y so the assumed
-    one-to-one window correspondence holds.
+    `query_centers_sec` is the per-window center timestamp to write to the CSV.
     """
     if mode == "handcrafted":
         X_lab, y_lab = load_handcrafted_labeled(LABELED_HC)
         X_qry = load_handcrafted_sliding(SLIDING_HC)
-        return [X_lab], y_lab, [X_qry]
+        centers = compute_window_centers_sec(len(X_qry), HC_WIN_MS, HC_HOP_MS)
+        return [X_lab], y_lab, [X_qry], centers
 
     if mode == "labram":
-        # We still need labels — load them from HC labeled.
         _, y_lab = load_handcrafted_labeled(LABELED_HC)
         X_lab = load_labram_labeled(LABELED_LABRAM)
         if len(X_lab) != len(y_lab):
             raise ValueError(
                 f"LaBraM labeled rows ({len(X_lab)}) != HC labels ({len(y_lab)}). "
-                f"The two labeled files are not aligned window-to-window."
+                f"Labeled files are not aligned window-to-window."
             )
         X_qry = load_labram_sliding(SLIDING_LABRAM)
-        return [X_lab], y_lab, [X_qry]
+        centers = compute_window_centers_sec(len(X_qry), LABRAM_WIN_MS, LABRAM_HOP_MS)
+        return [X_lab], y_lab, [X_qry], centers
 
     if mode == "combined":
         X_lab_hc, y_lab = load_handcrafted_labeled(LABELED_HC)
         X_lab_lb = load_labram_labeled(LABELED_LABRAM)
+        # Labeled side: annotation-centered windows. We trust they are aligned
+        # if counts match — same logic as before.
         if len(X_lab_lb) != len(y_lab):
             raise ValueError(
                 f"LaBraM labeled rows ({len(X_lab_lb)}) != HC labels ({len(y_lab)}). "
-                f"The two labeled files are not aligned window-to-window."
+                f"Labeled files are not aligned window-to-window."
             )
 
-        X_qry_hc = load_handcrafted_sliding(SLIDING_HC)
-        X_qry_lb = load_labram_sliding(SLIDING_LABRAM)
-        if len(X_qry_hc) != len(X_qry_lb):
-            raise ValueError(
-                f"Sliding HC ({len(X_qry_hc)}) and LaBraM ({len(X_qry_lb)}) "
-                f"lengths differ — sliding sets are not aligned."
-            )
-        return [X_lab_hc, X_lab_lb], y_lab, [X_qry_hc, X_qry_lb]
+        # Sliding side: align by window CENTER.
+        X_qry_hc_raw = load_handcrafted_sliding(SLIDING_HC)
+        X_qry_lb_raw = load_labram_sliding(SLIDING_LABRAM)
+
+        X_qry_hc, X_qry_lb, centers = align_sliding_by_center(
+            X_qry_hc_raw, X_qry_lb_raw,
+            HC_WIN_MS, HC_HOP_MS,
+            LABRAM_WIN_MS, LABRAM_HOP_MS,
+        )
+
+        print(f"  Sliding HC raw : {X_qry_hc_raw.shape}")
+        print(f"  Sliding LB raw : {X_qry_lb_raw.shape}")
+        print(f"  Aligned HC     : {X_qry_hc.shape}")
+        print(f"  Aligned LB     : {X_qry_lb.shape}")
+        print(f"  Common centers : [{centers[0]:.3f} .. {centers[-1]:.3f}] s")
+
+        return [X_lab_hc, X_lab_lb], y_lab, [X_qry_hc, X_qry_lb], centers
 
     raise ValueError(f"Unknown FEATURE_MODE: {mode}")
 
@@ -173,8 +242,6 @@ def load_features(mode: str):
 # -------------------------------------------------
 
 def sample_support(y: np.ndarray, n_shot: int, rng) -> np.ndarray:
-    """Returns indices into the labeled set for the support windows.
-    Same indices are used across modalities so the support set stays aligned."""
     pos_idx = np.where(y == 1)[0]
     neg_idx = np.where(y == 0)[0]
     if len(pos_idx) < n_shot:
@@ -191,7 +258,6 @@ def normalize_support_query(
     X_support_blocks: list[np.ndarray],
     X_query_blocks: list[np.ndarray],
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Per-modality StandardScaler fit on support, applied to both."""
     sup_parts = []
     qry_parts = []
     for X_sup_block, X_qry_block in zip(X_support_blocks, X_query_blocks):
@@ -257,8 +323,7 @@ def sec_to_hmsms(sec: float) -> str:
 def main():
     print(f"Feature mode: {FEATURE_MODE}")
 
-    # 1) Load all required modalities
-    X_labeled_blocks, y_labeled, X_query_blocks = load_features(FEATURE_MODE)
+    X_labeled_blocks, y_labeled, X_query_blocks, centers_sec = load_features(FEATURE_MODE)
     print(f"  Labeled windows: {len(y_labeled)} "
           f"(pos={int(y_labeled.sum())}, neg={int((y_labeled == 0).sum())})")
     for i, blk in enumerate(X_labeled_blocks):
@@ -266,7 +331,6 @@ def main():
     for i, blk in enumerate(X_query_blocks):
         print(f"  Query   block {i}: shape={blk.shape}")
 
-    # 2) Pick the same support indices across modalities
     rng = np.random.default_rng(RANDOM_SEED)
     sup_idx = sample_support(y_labeled, N_SHOT, rng)
     y_sup = y_labeled[sup_idx]
@@ -274,12 +338,10 @@ def main():
     print(f"  Support set: {len(y_sup)} windows "
           f"(pos={int(y_sup.sum())}, neg={int((y_sup == 0).sum())})")
 
-    # 3) Normalize per modality, then concat
     X_sup, X_qry = normalize_support_query(X_sup_blocks, X_query_blocks)
     print(f"  Support features: {X_sup.shape}")
     print(f"  Query   features: {X_qry.shape}")
 
-    # 4) Prototypical predict
     print(f"\nClassifying with prototypical network ({DISTANCE})...")
     y_proba = prototypical_predict_proba(X_sup, y_sup, X_qry, distance=DISTANCE)
     y_pred = (y_proba >= THRESHOLD).astype(np.uint8)
@@ -290,10 +352,11 @@ def main():
           f"{int(y_pred.sum())} / {len(y_pred)} "
           f"({100.0 * y_pred.mean():.2f}%)")
 
-    # 5) Compute window centers
-    centers_sec = compute_window_centers_sec(len(y_proba), WIN_MS, HOP_MS)
+    if len(centers_sec) != len(y_proba):
+        raise RuntimeError(
+            f"Internal error: {len(centers_sec)} centers vs {len(y_proba)} predictions."
+        )
 
-    # 6) Save CSV with mode in the filename
     CSV_DIR.mkdir(parents=True, exist_ok=True)
     csv_path = CSV_DIR / f"P70_{N_SHOT}shot_predictions_{FEATURE_MODE}.csv"
     print(f"\nSaving predictions to: {csv_path}")
