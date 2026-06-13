@@ -140,7 +140,7 @@ def create_annotation_centered_epochs(
         sfreq,
         positive_label="*",
         negative_label="-",
-        window=250,  # in ms
+        window=500,  # in ms
 ):
     annotation_onsets_samples = np.round(annotations.onset * sfreq).astype(int)
     annotation_onsets_sec = np.asarray(annotations.onset, dtype=float)

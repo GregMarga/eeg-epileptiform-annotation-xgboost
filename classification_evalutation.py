@@ -216,7 +216,7 @@ def print_feature_stats(X: np.ndarray, feature_names: list[str], title: str = "F
 # -------------------------------------------------
 
 def main():
-    in_dir = Path("../../../data/80hz_freq_time_features_cache_basic")
+    in_dir = Path("../../../data/80hz_freq_time_features_pyprep_1s")
     patient_files = build_patient_index(in_dir)
     patients = sorted(patient_files.keys())
 

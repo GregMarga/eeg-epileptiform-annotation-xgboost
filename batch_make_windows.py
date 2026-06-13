@@ -15,7 +15,7 @@ def patient_id_from_filename(filename: str):
 
 def main():
     data_dir = Path("../../../data")
-    out_dir = data_dir / "windows_cache_80hz_pyprep"
+    out_dir = data_dir / "windows_cache_80hz_pyprep_1s"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # Parse the PyPREP report once; preprocess_edf_to_windows needs it for every file

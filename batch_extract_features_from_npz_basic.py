@@ -248,8 +248,8 @@ def process_npz_file(npz_path: Path, out_dir: Path, batch_windows: int = 512):
 
 
 def main():
-    in_dir = Path("../../../data/windows_cache_80hz_pyprep")
-    out_dir = Path("../../../data/80hz_freq_time_features_pyprep")
+    in_dir = Path("../../../data/windows_cache_80hz_pyprep_1s")
+    out_dir = Path("../../../data/80hz_freq_time_features_pyprep_1s")
 
     npz_files = sorted(in_dir.glob("*_windows.npz"))
     if not npz_files:
