@@ -20,8 +20,8 @@ FEATURES_DIR   = Path("../../../data/80hz_freq_time_features_cache_basic")
 N_SHOT_RANGE = list(range(1, 21))
 RANDOM_SEED  = 42
 
-USE_LABRAM_ONLY      = False
-USE_HANDCRAFTED_ONLY = True
+USE_LABRAM_ONLY      = True
+USE_HANDCRAFTED_ONLY = False
 USE_COMBINED         = False
 
 # Επιλεγμένο handcrafted feature index (0-based)

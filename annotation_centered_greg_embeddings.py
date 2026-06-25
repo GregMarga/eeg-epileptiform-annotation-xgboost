@@ -19,7 +19,7 @@ from sklearn.metrics import (
 # -------------------------------------------------
 
 # Άλλαξε το path αν χρειάζεται. Σταθερό σημείο για να το πειράζεις εύκολα.
-IN_DIR = Path("../../../data/my_labram_embeddings_1s")
+IN_DIR = Path("../../../data/labram_embeddings_1s_new")
 
 # Glob pattern για τα npz σου. Αν τα ονόματα έχουν συγκεκριμένο suffix
 # (π.χ. "*_embeddings.npz") βάλ' το εδώ· αλλιώς "*.npz" τα πιάνει όλα.
