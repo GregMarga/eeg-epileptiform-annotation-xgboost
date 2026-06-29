@@ -31,7 +31,8 @@ PD_MARK = "*"
 
 
 def strip_prefix(desc: str) -> str:
-    return desc.removeprefix(NOTE_PREFIX)
+    # NOTE: exports can have trailing whitespace, e.g. 'Note : * ' -> strip it.
+    return desc.removeprefix(NOTE_PREFIX).strip()
 
 
 def read_marks_from_edf(edf_path: Path) -> np.ndarray:
