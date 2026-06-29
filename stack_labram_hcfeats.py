@@ -20,7 +20,7 @@ from sklearn.metrics import (
 # -------------------------------------------------
 
 FEATURES_DIR = Path("../../../data/80hz_freq_time_features_cache_basic")
-EMBEDDINGS_DIR = Path("../../../data/labram_classification_1s")
+EMBEDDINGS_DIR = Path("../../../data/labram_embeddings_1s_new")
 
 # -------------------------------------------------
 # Helpers
@@ -58,8 +58,10 @@ def load_features(path: Path) -> tuple[np.ndarray, np.ndarray]:
 
 def load_embeddings(path: Path) -> tuple[np.ndarray, np.ndarray]:
     z = np.load(path, allow_pickle=True)
-    X = z["X"].astype(np.float32)
-    y = z["y"].astype(np.uint8).ravel()
+
+    X = z["embeddings"].astype(np.float32)
+    y = z["labels"].astype(np.uint8).ravel()
+
     return X, y
 
 
@@ -67,7 +69,7 @@ def load_combined(feat_paths: list[Path], emb_paths: list[Path]) -> tuple[np.nda
     xs, ys = [], []
 
     feat_map = {p.name.replace("_features.npz", ""): p for p in feat_paths}
-    emb_map  = {p.name.replace("_embeddings_labeled.npz", ""): p for p in emb_paths}
+    emb_map  = {p.name.replace("_embeddings.npz", ""): p for p in emb_paths}
 
     common = sorted(set(feat_map) & set(emb_map))
     missing = set(feat_map) ^ set(emb_map)
@@ -155,7 +157,7 @@ def summarize_metric(values):
 
 def main():
     feat_index = build_index(FEATURES_DIR, "_features.npz")
-    emb_index  = build_index(EMBEDDINGS_DIR, "_embeddings_labeled.npz")
+    emb_index  = build_index(EMBEDDINGS_DIR, "_embeddings.npz")
 
     patients = sorted(set(feat_index) & set(emb_index))
     print(f"Patients: {patients} (n={len(patients)})")

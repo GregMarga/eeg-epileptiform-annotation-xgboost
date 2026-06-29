@@ -2,6 +2,7 @@ import re
 from pathlib import Path
 import csv
 import numpy as np
+import matplotlib.pyplot as plt
 from xgboost import XGBClassifier
 from sklearn.metrics import (
     accuracy_score,
@@ -20,17 +21,16 @@ from sklearn.metrics import (
 # -------------------------------------------------
 
 FEATURES_DIR   = Path("../../../data/80hz_freq_time_features_cache_basic")
-EMBEDDINGS_DIR = Path("../../../data/labram_classification_1s")
+EMBEDDINGS_DIR = Path("../../../data/labram_embeddings_1s_new")
 
 
 # -------------------------------------------------
-# Flags (exactly one True)
+# Config
 # -------------------------------------------------
 
-USE_LABRAM_ONLY = True
-USE_COMBINED    = False
+# Both modes are run in a single execution and compared side by side.
+MODES = ["handcrafted", "labram"]
 
-# Sweep config
 N_SHOT_RANGE = list(range(1, 21))   # 1..20 inclusive
 THRESHOLD = 0.5
 
@@ -64,31 +64,29 @@ def load_features(path: Path) -> tuple[np.ndarray, np.ndarray]:
 
 def load_embeddings(path: Path) -> tuple[np.ndarray, np.ndarray]:
     z = np.load(path, allow_pickle=True)
-    X = z["X"].astype(np.float32)
-    y = z["y"].astype(np.uint8).ravel()
+    X = z["embeddings"].astype(np.float32)
+    y = z["labels"].astype(np.uint8).ravel()
     return X, y
 
 
-def load_recording(base: str, feat_map: dict[str, Path], emb_map: dict[str, Path]) -> tuple[np.ndarray, np.ndarray]:
-    """Load one recording according to the active mode flag."""
-    if USE_LABRAM_ONLY:
+def load_recording(
+    base: str,
+    mode: str,
+    feat_map: dict[str, Path],
+    emb_map: dict[str, Path],
+) -> tuple[np.ndarray, np.ndarray]:
+    """Load one recording for the requested mode."""
+    if mode == "handcrafted":
+        if base not in feat_map:
+            raise ValueError(f"No features for {base}")
+        return load_features(feat_map[base])
+
+    if mode == "labram":
         if base not in emb_map:
             raise ValueError(f"No embeddings for {base}")
         return load_embeddings(emb_map[base])
 
-    # USE_COMBINED
-    if base not in emb_map or base not in feat_map:
-        raise ValueError(f"Missing data for {base}")
-
-    X_feat, y_feat = load_features(feat_map[base])
-    X_emb,  y_emb  = load_embeddings(emb_map[base])
-
-    if len(y_feat) != len(y_emb):
-        raise ValueError(f"Window mismatch for {base}: feat={len(y_feat)} emb={len(y_emb)}")
-    if not np.array_equal(y_feat, y_emb):
-        raise ValueError(f"Label mismatch for {base}")
-
-    return np.hstack([X_feat, X_emb]), y_emb
+    raise ValueError(f"Unknown mode: {mode}")
 
 
 # -------------------------------------------------
@@ -120,11 +118,11 @@ def train_xgb(x_train: np.ndarray, y_train: np.ndarray) -> XGBClassifier:
     scale_pos_weight = (neg / pos) if pos > 0 else 1.0
 
     model = XGBClassifier(
-        n_estimators=400,
+        n_estimators=30,
         learning_rate=0.05,
-        max_depth=4,
-        subsample=0.8,
-        colsample_bytree=0.8,
+        max_depth=1,
+        subsample=1,
+        colsample_bytree=1,
         objective="binary:logistic",
         eval_metric="logloss",
         tree_method="hist",
@@ -174,11 +172,12 @@ def summarize_metric(values):
 
 
 # -------------------------------------------------
-# Sweep one N_SHOT value across all files
+# Sweep one N_SHOT value across all files (for one mode)
 # -------------------------------------------------
 
 def run_for_n_shot(
     n_shot: int,
+    mode: str,
     recordings: list[str],
     feat_map: dict[str, Path],
     emb_map: dict[str, Path],
@@ -192,7 +191,7 @@ def run_for_n_shot(
 
     for base in recordings:
         try:
-            X, y = load_recording(base, feat_map, emb_map)
+            X, y = load_recording(base, mode, feat_map, emb_map)
         except ValueError:
             n_files_skipped += 1
             continue
@@ -234,54 +233,116 @@ def run_for_n_shot(
     return row
 
 
-# -------------------------------------------------
-# Main
-# -------------------------------------------------
-
-def main():
-    assert sum([USE_LABRAM_ONLY, USE_COMBINED]) == 1, \
-        "Exactly one of USE_LABRAM_ONLY / USE_COMBINED must be True"
-
-    if USE_LABRAM_ONLY:
-        mode = "LaBraM only"
-        csv_output = Path("results_xgb_fewshot_labram.csv")
-    else:
-        mode = "Handcrafted + LaBraM (combined)"
-        csv_output = Path("results_xgb_fewshot_combined.csv")
-
-    print(f"Mode: {mode}")
-    print(f"Threshold: {THRESHOLD}")
-
-    feat_map = build_path_map(FEATURES_DIR,   "_features.npz")
-    emb_map  = build_path_map(EMBEDDINGS_DIR, "_embeddings_labeled.npz")
-
-    if USE_LABRAM_ONLY:
-        recordings = sorted(emb_map.keys())
-    else:
-        recordings = sorted(set(feat_map.keys()) & set(emb_map.keys()))
-
-    print(f"Recordings: {len(recordings)}")
-    print(f"Sweeping N_SHOT: {N_SHOT_RANGE}\n")
-
+def run_sweep_for_mode(
+    mode: str,
+    recordings: list[str],
+    feat_map: dict[str, Path],
+    emb_map: dict[str, Path],
+    threshold: float,
+) -> list[dict[str, float]]:
+    print(f"\n========== Mode: {mode} ==========")
     rows = []
     for n_shot in N_SHOT_RANGE:
-        row = run_for_n_shot(n_shot, recordings, feat_map, emb_map, THRESHOLD)
+        row = run_for_n_shot(n_shot, mode, recordings, feat_map, emb_map, threshold)
         rows.append(row)
         print(
             f"n_shot={n_shot:2d} | files_used={row['n_files_used']:3d} "
             f"(skipped={row['n_files_skipped']:3d}) | "
             f"acc={row['acc']:.4f} ± {row['acc_std']:.4f} | "
-            f"bacc={row['bacc']:.4f} | f1={row['f1']:.4f} | "
-            f"roc_auc={row['roc_auc']:.4f}"
+            f"bacc={row['bacc']:.4f} ± {row['bacc_std']:.4f} | "
+            f"f1={row['f1']:.4f} | "
+            f"roc_auc={row['roc_auc']:.4f} ± {row['roc_auc_std']:.4f}"
         )
+    return rows
 
+
+def save_rows(rows: list[dict[str, float]], csv_output: Path):
     fieldnames = list(rows[0].keys())
     with csv_output.open("w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
+    print(f"  Saved: {csv_output.resolve()}")
 
-    print(f"\nResults saved to: {csv_output.resolve()}")
+
+# -------------------------------------------------
+# Plotting
+# -------------------------------------------------
+
+MODE_TITLES = {"handcrafted": "Handcrafted", "labram": "LaBraM"}
+MODE_COLORS = {"handcrafted": "tab:orange", "labram": "tab:blue"}
+
+# (metric key, axis label) for each plotted row
+PLOT_METRICS = [
+    ("bacc",    "Balanced accuracy"),
+    ("roc_auc", "ROC AUC"),
+]
+
+
+def plot_all(results: dict[str, list[dict]]):
+    """Single figure, 2x2 grid: rows = metric, columns = mode."""
+    n_rows = len(PLOT_METRICS)
+    n_cols = len(MODES)
+    fig, axes = plt.subplots(
+        n_rows, n_cols,
+        figsize=(12, 9),
+        sharex=True, sharey="row",
+    )
+
+    for r, (metric, ylabel) in enumerate(PLOT_METRICS):
+        for c, mode in enumerate(MODES):
+            ax = axes[r, c]
+            rows = results[mode]
+            xs = np.array([row["n_shot"] for row in rows])
+            means = np.array([row[metric] for row in rows], dtype=float)
+            stds = np.array([row[f"{metric}_std"] for row in rows], dtype=float)
+
+            color = MODE_COLORS[mode]
+            ax.plot(xs, means, marker="o", color=color)
+            ax.fill_between(xs, means - stds, means + stds, alpha=0.2, color=color)
+
+            ax.set_ylim(0.0, 1.0)
+            ax.grid(alpha=0.3)
+
+            # Column titles only on the top row
+            if r == 0:
+                ax.set_title(MODE_TITLES[mode])
+            # Row label (metric) only on the leftmost column
+            if c == 0:
+                ax.set_ylabel(ylabel)
+            # x label only on the bottom row
+            if r == n_rows - 1:
+                ax.set_xlabel("n_shot")
+                ax.set_xticks(xs[::2])
+
+    fig.suptitle("Few-shot sweep — Balanced accuracy & ROC AUC vs n_shot")
+    fig.tight_layout()
+
+
+# -------------------------------------------------
+# Main
+# -------------------------------------------------
+
+def main():
+    print(f"Threshold: {THRESHOLD}")
+
+    feat_map = build_path_map(FEATURES_DIR,   "_features.npz")
+    emb_map  = build_path_map(EMBEDDINGS_DIR, "_embeddings.npz")
+
+    # Same recordings for both modes -> fair apples-to-apples comparison
+    recordings = sorted(set(feat_map.keys()) & set(emb_map.keys()))
+    print(f"Recordings (in both features & embeddings): {len(recordings)}")
+    print(f"Sweeping N_SHOT: {N_SHOT_RANGE}")
+
+    results: dict[str, list[dict]] = {}
+    for mode in MODES:
+        rows = run_sweep_for_mode(mode, recordings, feat_map, emb_map, THRESHOLD)
+        results[mode] = rows
+        save_rows(rows, Path(f"results_xgb_fewshot_{mode}.csv"))
+
+    # --- Single figure, 2x2 grid (rows = metric, columns = mode) ---
+    plot_all(results)
+    plt.show()
 
 
 if __name__ == "__main__":

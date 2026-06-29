@@ -13,14 +13,15 @@ def patient_from_filename(name: str) -> str | None:
 
 def load_features(npz_path: Path):
     z = np.load(npz_path, allow_pickle=True)
-    required = {"X", "y", "windows", "source_edf"}
-    if not required.issubset(set(z.files)):
+
+    if "embeddings" not in z.files or "labels" not in z.files:
         raise KeyError(f"Missing keys in {npz_path}. Found={sorted(z.files)}")
-    return z["X"].astype(np.float32), z["y"].astype(np.uint8).ravel()
+
+    return z["embeddings"].astype(np.float32), z["labels"].astype(np.uint8).ravel()
 
 
 def build_patient_index(in_dir: Path) -> dict[str, list[Path]]:
-    files = sorted(in_dir.glob("*_embeddings_labeled.npz"))
+    files = sorted(in_dir.glob("*_embeddings.npz"))
     if not files:
         raise RuntimeError(f"No *_embeddings_labeled.npz files found in {in_dir}")
     patient_files: dict[str, list[Path]] = {}
@@ -32,7 +33,7 @@ def build_patient_index(in_dir: Path) -> dict[str, list[Path]]:
 
 
 def main():
-    in_dir = Path("../../../Data/labram_classification_1s")
+    in_dir = Path("../../../Data/labram_embeddings_1s_new")
     patient_files = build_patient_index(in_dir)
     patients = sorted(patient_files.keys())
     print(f"Patients: {patients} (n={len(patients)})")
