@@ -1,5 +1,4 @@
 from pathlib import Path
-import argparse
 import numpy as np
 import mne
 from scipy.stats import skew, kurtosis
@@ -14,12 +13,14 @@ WINDOWS_DIR = DATA_DIR / "labram_sliding_windows_1s_75overlap"   # *_windows.npz
 OUT_DIR     = DATA_DIR / "features_1s_labeled"                   # outputs go here
 
 # =================================================
-# Labeling parameters (seconds) -- same rule as the embedding labeling script
+# Labeling rule -- same rule as the embedding labeling script
 # =================================================
-M_SEC = 0.10   # edge margin: a '*' must sit at least m inside the window to be POSITIVE
-G_SEC = 0.30   # guard band: a no-mark window is NEGATIVE only if nearest mark is >= g away
+# A window is POSITIVE if at least one '*' discharge mark falls inside it,
+# and NEGATIVE otherwise. No edge margin, no guard band, no IGNORE class,
+# no dependence on segment type ('*' marks only occur inside PD segments,
+# so NON_PD windows have no marks and become NEGATIVE automatically).
 
-POSITIVE, NEGATIVE, IGNORE = 1, 0, -1
+POSITIVE, NEGATIVE = 1, 0
 
 NOTE_PREFIX = "Note : "
 PD_MARK = "*"
@@ -171,26 +172,24 @@ def read_marks_from_edf(edf_path: Path) -> np.ndarray:
     return np.sort(marks)
 
 
-def label_windows(onsets, seg_types, marks, window_sec, m, g):
+def label_windows(onsets, marks, window_sec):
+    """Per window [s, e = s + window_sec]:
+      - POSITIVE if at least one '*' mark falls inside [s, e]
+      - NEGATIVE otherwise
+    """
     onsets = np.asarray(onsets, dtype=float)
-    seg_types = np.asarray([str(s).upper() for s in seg_types])
-    marks = np.asarray(marks, dtype=float)
+    marks = np.sort(np.asarray(marks, dtype=float))
 
-    labels = np.empty(len(onsets), dtype=np.int8)
-    for i, s in enumerate(onsets):
-        e = s + window_sec
-        if seg_types[i] != PD:
-            labels[i] = NEGATIVE
-            continue
-        if marks.size == 0:
-            labels[i] = NEGATIVE
-            continue
-        in_core = (marks >= s + m) & (marks <= e - m)
-        if in_core.any():
-            labels[i] = POSITIVE
-            continue
-        gap = np.maximum.reduce([s - marks, marks - e, np.zeros_like(marks)])
-        labels[i] = IGNORE if gap.min() < g else NEGATIVE
+    labels = np.full(len(onsets), NEGATIVE, dtype=np.int8)
+    if marks.size == 0:
+        return labels
+
+    starts = onsets
+    ends = onsets + window_sec
+    # A mark lies in [s, e] iff there is a mark index in [lo, hi).
+    lo = np.searchsorted(marks, starts, side="left")
+    hi = np.searchsorted(marks, ends, side="right")
+    labels[hi > lo] = POSITIVE
     return labels
 
 
@@ -198,7 +197,7 @@ def label_windows(onsets, seg_types, marks, window_sec, m, g):
 # Process one window file
 # =================================================
 
-def process_file(win_path: Path, edf_path: Path, out_path: Path, m: float, g: float,
+def process_file(win_path: Path, edf_path: Path, out_path: Path,
                  batch_windows: int = 512):
     z = np.load(win_path, allow_pickle=True)
 
@@ -229,36 +228,33 @@ def process_file(win_path: Path, edf_path: Path, out_path: Path, m: float, g: fl
         print(f"  ! mark count differs: EDF={len(marks)} vs NPZ={len(z['pd_marks_sec'])} "
               f"(using EDF marks)")
 
-    labels = label_windows(onsets, seg_types, marks, window_sec, m, g)
-    valid_mask = labels != IGNORE
+    labels = label_windows(onsets, marks, window_sec)
+    valid_mask = np.ones(len(labels), dtype=bool)  # no IGNORE class now
 
     n_pos = int((labels == POSITIVE).sum())
     n_neg = int((labels == NEGATIVE).sum())
-    n_ign = int((labels == IGNORE).sum())
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(
         out_path,
         X=X,
-        y=labels,                      # 1 / 0 / -1  (filter with y != -1 before training)
+        y=labels,                      # 1 / 0
         labels=labels,                 # alias, same values
         valid_mask=valid_mask,
         ch_names=np.array(ch_names, dtype=object),
         feature_names=np.array(fnames, dtype=object),
         window_onsets_sec=np.asarray(onsets, dtype=np.float64),
-        segment_type=np.asarray(seg_types, dtype=object),
+        segment_type=np.asarray([str(s).upper() for s in seg_types], dtype=object),
         segment_id=z["segment_id"] if "segment_id" in z.files else np.array([]),
         pd_marks_sec=marks,
         sfreq=sfreq,
         window_sec=window_sec,
         stride_sec=float(z["stride_sec"]) if "stride_sec" in z.files else float("nan"),
-        label_m_sec=np.float32(m),
-        label_g_sec=np.float32(g),
         source_npz=win_path.name,
         source_edf=edf_path.name,
     )
     print(f"  Saved: {out_path} | X={X.shape} | "
-          f"POSITIVE={n_pos} NEGATIVE={n_neg} IGNORE={n_ign} | marks={len(marks)}")
+          f"POSITIVE={n_pos} NEGATIVE={n_neg} | marks={len(marks)}")
 
 
 # =================================================
@@ -266,17 +262,12 @@ def process_file(win_path: Path, edf_path: Path, out_path: Path, m: float, g: fl
 # =================================================
 
 def main():
-    ap = argparse.ArgumentParser(description="Extract handcrafted features + labels for P58 sliding windows.")
-    ap.add_argument("--m", type=float, default=M_SEC, help="Edge margin in seconds")
-    ap.add_argument("--g", type=float, default=G_SEC, help="Guard band in seconds")
-    args = ap.parse_args()
-
     win_files = sorted(WINDOWS_DIR.glob("*_windows.npz"))
     if not win_files:
         raise RuntimeError(f"No *_windows.npz files in {WINDOWS_DIR}")
 
-    print(f"Found {len(win_files)} window files | m={args.m}s g={args.g}s")
-    print("Labels: 1=positive, 0=negative, -1=ignore. Filter with `y != -1`.\n")
+    print(f"Found {len(win_files)} window files")
+    print("Labels: 1=positive, 0=negative. A window is positive iff a '*' mark is inside it.\n")
 
     for win_path in win_files:
         stem = win_path.name.replace("_windows.npz", "")
@@ -289,7 +280,7 @@ def main():
             continue
 
         try:
-            process_file(win_path, edf_path, out_path, args.m, args.g)
+            process_file(win_path, edf_path, out_path)
         except Exception as e:
             print(f"  ERROR: {e}")
 
