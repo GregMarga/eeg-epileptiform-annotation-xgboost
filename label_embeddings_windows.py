@@ -1,4 +1,3 @@
-import argparse
 from pathlib import Path
 
 import numpy as np
@@ -6,24 +5,15 @@ import mne
 
 
 # --------------------------------------------------
-# Labeling parameters (seconds)
+# Labeling rule
 # --------------------------------------------------
+# A window is POSITIVE if at least one '*' discharge mark falls inside it,
+# and NEGATIVE otherwise. No edge margin, no guard band, no IGNORE class,
+# no dependence on segment type ('*' marks only occur inside PD segments,
+# so NON_PD windows have no marks and become NEGATIVE automatically).
 
-# m: edge margin. A '*' mark must sit at least m inside the window for the
-#    window to count as positive, so the whole discharge waveform fits in it.
-#    Tie this to ~half the typical discharge duration (~0.2-0.3 s -> m ~ 0.1-0.15).
-M_SEC = 0.10
-
-# g: guard band. A window with no qualifying mark is only labeled NEGATIVE if the
-#    nearest mark is at least g away from the window interval; otherwise the window
-#    sits in the transition zone and is EXCLUDED. g is larger than m on purpose:
-#    it buffers against a neighboring discharge "bleeding" into the window.
-G_SEC = 0.30
-
-# Label values
 POSITIVE = 1
 NEGATIVE = 0
-IGNORE   = -1
 
 # Annotation parsing (matches the windowing script)
 NOTE_PREFIX = "Note : "
@@ -48,46 +38,26 @@ def read_marks_from_edf(edf_path: Path) -> np.ndarray:
 # Core labeling rule
 # --------------------------------------------------
 
-def label_windows(onsets, seg_types, marks, window_sec, m, g):
+def label_windows(onsets, marks, window_sec):
     """Assign a label to each window.
 
-    Per window [s, e=s+window_sec]:
-      - NON_PD segment                       -> NEGATIVE
-      - PD segment, a mark inside [s+m, e-m]  -> POSITIVE
-      - PD segment, no such mark but nearest
-        mark closer than g to the interval    -> IGNORE (transition zone)
-      - PD segment, otherwise                 -> NEGATIVE (clean inter-discharge)
+    Per window [s, e = s + window_sec]:
+      - POSITIVE if at least one '*' mark falls inside [s, e]
+      - NEGATIVE otherwise
     """
     onsets = np.asarray(onsets, dtype=float)
-    seg_types = np.asarray([str(s).upper() for s in seg_types])
-    marks = np.asarray(marks, dtype=float)
+    marks = np.sort(np.asarray(marks, dtype=float))
 
-    labels = np.empty(len(onsets), dtype=np.int8)
+    labels = np.full(len(onsets), NEGATIVE, dtype=np.int8)
+    if marks.size == 0:
+        return labels
 
-    for i, s in enumerate(onsets):
-        e = s + window_sec
-
-        if seg_types[i] != "PD":
-            labels[i] = NEGATIVE
-            continue
-
-        if marks.size == 0:
-            labels[i] = NEGATIVE
-            continue
-
-        # Positive if a mark sits well inside the window (core region).
-        in_core = (marks >= s + m) & (marks <= e - m)
-        if in_core.any():
-            labels[i] = POSITIVE
-            continue
-
-        # Distance from each mark to the window interval (0 if inside [s, e]).
-        gap = np.maximum.reduce([s - marks, marks - e, np.zeros_like(marks)])
-        if gap.min() < g:
-            labels[i] = IGNORE      # transition zone: mark near an edge / just outside
-        else:
-            labels[i] = NEGATIVE    # clean inter-discharge background
-
+    starts = onsets
+    ends = onsets + window_sec
+    # A mark lies in [s, e] iff there is a mark index in [lo, hi).
+    lo = np.searchsorted(marks, starts, side="left")
+    hi = np.searchsorted(marks, ends, side="right")
+    labels[hi > lo] = POSITIVE
     return labels
 
 
@@ -102,11 +72,10 @@ EMB_DIR  = DATA_DIR / "labram_sliding_windows_1s_75overlap_embeddings"
 OUT_DIR  = DATA_DIR / "labeled"
 
 
-def label_one(edf_path: Path, npz_path: Path, out_path: Path, m: float, g: float):
+def label_one(edf_path: Path, npz_path: Path, out_path: Path):
     d = np.load(npz_path, allow_pickle=True)
 
     onsets = d["window_onsets_sec"]
-    seg_types = d["segment_type"]
     window_sec = float(d["window_sec"]) if "window_sec" in d.files else 1.0
 
     marks = read_marks_from_edf(edf_path)
@@ -118,32 +87,23 @@ def label_one(edf_path: Path, npz_path: Path, out_path: Path, m: float, g: float
             print(f"  ! mark count differs: EDF={len(marks)} vs NPZ={len(npz_marks)} "
                   f"(using EDF marks)")
 
-    print(f"  windows={len(onsets)} | window_sec={window_sec} | marks={len(marks)} "
-          f"| m={m}s g={g}s")
+    print(f"  windows={len(onsets)} | window_sec={window_sec} | marks={len(marks)}")
 
-    labels = label_windows(onsets, seg_types, marks, window_sec, m, g)
+    labels = label_windows(onsets, marks, window_sec)
 
     n_pos = int((labels == POSITIVE).sum())
     n_neg = int((labels == NEGATIVE).sum())
-    n_ign = int((labels == IGNORE).sum())
-    print(f"  POSITIVE={n_pos} | NEGATIVE={n_neg} | IGNORE={n_ign} (transition zone)")
+    print(f"  POSITIVE={n_pos} | NEGATIVE={n_neg}")
 
     payload = {k: d[k] for k in d.files}
     payload["labels"] = labels
-    payload["valid_mask"] = labels != IGNORE
-    payload["label_m_sec"] = np.float32(m)
-    payload["label_g_sec"] = np.float32(g)
+    payload["valid_mask"] = np.ones(len(labels), dtype=bool)  # no IGNORE class now
 
     np.savez_compressed(out_path, **payload)
     print(f"  saved: {out_path}")
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Label sliding-window embeddings from EDF '*' marks.")
-    ap.add_argument("--m", type=float, default=M_SEC, help="Edge margin in seconds")
-    ap.add_argument("--g", type=float, default=G_SEC, help="Guard band in seconds")
-    args = ap.parse_args()
-
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
     emb_files = sorted(EMB_DIR.glob("*_embeddings.npz"))
@@ -151,7 +111,7 @@ def main():
         raise RuntimeError(f"No *_embeddings.npz files in {EMB_DIR}")
 
     print(f"Found {len(emb_files)} embedding files")
-    print(f"Labels: 1=positive, 0=negative, -1=ignore. Filter with `labels != -1`.\n")
+    print("Labels: 1=positive, 0=negative. A window is positive iff a '*' mark is inside it.\n")
 
     for npz_path in emb_files:
         stem = npz_path.name.replace("_embeddings.npz", "")
@@ -164,7 +124,7 @@ def main():
             continue
 
         try:
-            label_one(edf_path, npz_path, out_path, args.m, args.g)
+            label_one(edf_path, npz_path, out_path)
         except Exception as e:
             print(f"  ERROR: {e}")
 
