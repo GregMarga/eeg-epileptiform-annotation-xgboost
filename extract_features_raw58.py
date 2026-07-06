@@ -1,5 +1,30 @@
+"""
+
+=====================================
+
+Same handcrafted-feature band as the doc-12 script (0.5-40 Hz, 80 Hz), same
+segment-restricted windowing, same 16-dim features and output format -- but the
+static 24h bad-channel report is replaced by PER-SEGMENT PyPREP run from scratch.
+
+Only ONE thing changes vs the doc-12 script: static report -> per-segment PyPREP.
+If this recovers ~0.71 balanced accuracy on P58, it proves the false-positive
+flood in features_1s_labeled_1_40hz came from the static report leaving some
+segment-local bad channels uninterpolated (their broadband power leaked into
+NEGATIVE windows and looked like discharges).
+
+Pipeline per segment (band kept EXACTLY as doc 12 by band-passing BEFORE PyPREP):
+  crop [start-pad, stop+pad]
+    -> rename/map 10-20, pick standard EEG channels, montage
+    -> bandpass 0.5-40 Hz               (single filter -> effective HP = 0.5 Hz)
+    -> PyPREP detect (deviation/correlation/ransac, NO hf_noise) + interpolate
+    -> average reference                (after interp, so bads don't contaminate)
+    -> resample 80 Hz
+    -> trim padding, keep core
+    -> sliding windows fully inside the segment core
+  then label from '*' marks + extract handcrafted features.
+"""
+
 import re
-import ast
 from pathlib import Path
 
 import mne
@@ -7,74 +32,39 @@ import numpy as np
 from scipy.stats import skew, kurtosis
 from scipy.signal import welch
 from mne.channels import make_standard_montage
+from pyprep import NoisyChannels
 
 
 # =================================================
 # Paths
 # =================================================
-DATA_DIR    = Path("../../../data/evaluation_recordings")
-REPORT_PATH = Path("../../../data/channel_detection_details.txt")
-OUT_DIR     = DATA_DIR / "features_1s_labeled_1_40hz"
+DATA_DIR = Path("../../../data/evaluation_recordings")
+OUT_DIR  = DATA_DIR / "features_1s_labeled_persegment"
 
 # =================================================
-# Window params
+# Window / band params
 # =================================================
-WINDOW_SEC  = 1.0
-OVERLAP     = 0.75
-STRIDE_SEC  = WINDOW_SEC * (1.0 - OVERLAP)  # 0.25 s
+WINDOW_SEC = 1.0
+OVERLAP    = 0.75
+STRIDE_SEC = WINDOW_SEC * (1.0 - OVERLAP)   # 0.25 s
+L_FREQ     = 0.5
+H_FREQ     = 40.0
+TARGET_SFREQ = 80.0
+
+# Padding on each side of a segment before filtering, trimmed off afterwards.
+# 0.5 Hz high-pass FIR is ~6-7 s, so 20 s is a safe margin. PyPREP also runs on
+# the padded crop, benefiting from the extra context.
+EDGE_PAD_SEC = 20.0
 
 # =================================================
-# Labeling
+# Labeling / annotations
 # =================================================
 POSITIVE, NEGATIVE = 1, 0
 NOTE_PREFIX = "Note : "
 PD_MARK = "*"
 PD, NON_PD = "PD", "NON_PD"
 
-
-# =================================================
-# Bad-channel report parsing (from the preprocessing script)
-# =================================================
-INTERPOLATE_CATEGORIES = ("deviation", "correlation", "ransac")
-
-
-def _parse_channel_list(value: str) -> list[str]:
-    cleaned = re.sub(r"np\.str_\(([^)]+)\)", r"\1", value.strip())
-    try:
-        return [str(c) for c in ast.literal_eval(cleaned)]
-    except (ValueError, SyntaxError):
-        return []
-
-
-def parse_channel_detection_report(txt_path: Path) -> dict[str, dict[str, list[str]]]:
-    text = Path(txt_path).read_text(encoding="utf-8", errors="replace")
-    edf_header_re = re.compile(r"^\[\d+/\d+\]\s+(.+?)\.edf\s*$", re.MULTILINE)
-    matches = list(edf_header_re.finditer(text))
-
-    report: dict[str, dict[str, list[str]]] = {}
-    for i, m in enumerate(matches):
-        basename = m.group(1).strip()
-        block_start = m.end()
-        block_end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
-        block = text[block_start:block_end]
-
-        cats: dict[str, list[str]] = {
-            "deviation": [], "hf_noise": [], "correlation": [], "ransac": [],
-        }
-        for cat in cats.keys():
-            cat_re = re.compile(rf"^\s*{cat}\s*:\s*(\[.*?\])\s*$", re.MULTILINE)
-            cm = cat_re.search(block)
-            if cm:
-                cats[cat] = _parse_channel_list(cm.group(1))
-        report[basename] = cats
-    return report
-
-
-# Old 10-20 nomenclature -> current standard names.
 OLD_TO_NEW_10_20 = {"T3": "T7", "T4": "T8", "T5": "P7", "T6": "P8"}
-
-# Real EEG channels we expect to keep; everything else (ECG, "Unspec ..."
-# monitoring channels, etc.) is dropped before filtering/interpolation.
 STANDARD_1020_CHANNELS = [
     "Fp1", "Fp2", "F7", "F3", "Fz", "F4", "F8",
     "T7", "C3", "Cz", "C4", "T8",
@@ -83,87 +73,8 @@ STANDARD_1020_CHANNELS = [
 ]
 
 
-def channels_to_interpolate(report_entry: dict[str, list[str]],
-                             rename_map: dict[str, str] | None = None) -> list[str]:
-    to_interp: set[str] = set()
-    for cat in INTERPOLATE_CATEGORIES:
-        to_interp.update(report_entry.get(cat, []))
-    if rename_map:
-        to_interp = {rename_map.get(ch, ch) for ch in to_interp}
-    return sorted(to_interp)
-
-
-def mark_and_interpolate_bad_channels_from_report(
-        raw: mne.io.BaseRaw,
-        edf_basename: str,
-        report: dict[str, dict[str, list[str]]],
-) -> list[str]:
-    if edf_basename not in report:
-        print(f"  [WARN] No report entry for {edf_basename} — skipping interpolation")
-        return []
-
-    entry = report[edf_basename]
-    # report was generated with old channel names in some recordings (T3/T4/T5/T6),
-    # so map those to the renamed channels actually present in raw
-    bad_channels = channels_to_interpolate(entry, rename_map=OLD_TO_NEW_10_20)
-    bad_channels = [ch for ch in bad_channels if ch in raw.ch_names]
-
-    if not bad_channels:
-        return []
-
-    raw.info["bads"] = bad_channels
-    raw.interpolate_bads(reset_bads=True)
-    return bad_channels
-
-
 # =================================================
-# Preprocessing (filter, resample, bad-channel interp, avg reference)
-# Returns the FULL continuous recording — no epoching here, since we
-# need the whole timeline to slide windows across PD/NON_PD segments.
-# =================================================
-
-def preprocess_raw(edf_path: Path, report: dict[str, dict[str, list[str]]],
-                    l_freq: float = 0.5, h_freq: float = 40.0):
-    edf_basename = edf_path.stem
-
-    raw = mne.io.read_raw_edf(str(edf_path), preload=True, verbose="ERROR")
-    raw.rename_channels(lambda ch: ch.replace("EEG ", "").strip())
-    raw.rename_channels({old: new for old, new in OLD_TO_NEW_10_20.items() if old in raw.ch_names})
-
-    # Drop everything that isn't a real 10-20 EEG channel (ECG, "Unspec ..."
-    # monitoring channels, etc.) — these have no montage position and/or
-    # invalid values that break spline interpolation.
-    eeg_present = [ch for ch in STANDARD_1020_CHANNELS if ch in raw.ch_names]
-    dropped = sorted(set(raw.ch_names) - set(eeg_present))
-    if dropped:
-        print(f"  Dropping non-EEG / unrecognized channels: {dropped}")
-    if not eeg_present:
-        raise RuntimeError(f"No standard 10-20 EEG channels found in {edf_path.name}")
-    raw.pick(eeg_present)
-
-    montage = make_standard_montage("standard_1020")
-    raw.set_montage(montage, match_case=False, on_missing="ignore")
-
-    raw.filter(l_freq=l_freq, h_freq=h_freq, method="fir", fir_design="firwin",
-               phase="zero", verbose="ERROR")
-    raw.resample(80, verbose="ERROR")
-
-    bad_chs = mark_and_interpolate_bad_channels_from_report(raw, edf_basename, report)
-
-    # average reference AFTER interpolation, same as before
-    raw.set_eeg_reference("average", verbose="ERROR")
-
-    data = raw.get_data()
-    if not np.isfinite(data).all():
-        bad_data_chs = [raw.ch_names[i] for i in range(len(raw.ch_names))
-                         if not np.isfinite(data[i]).all()]
-        raise RuntimeError(f"Non-finite values remain after preprocessing in: {bad_data_chs}")
-
-    return raw, bad_chs
-
-
-# =================================================
-# Segment (PD_START/PD_STOP, NON_PD_START/NON_PD_STOP) + mark parsing
+# Annotation parsing (segments + marks) -- with .strip() and stable sort
 # =================================================
 
 def strip_prefix(desc: str) -> str:
@@ -171,17 +82,10 @@ def strip_prefix(desc: str) -> str:
 
 
 def parse_segments_and_marks(raw: mne.io.BaseRaw):
-    """
-    Returns:
-        segments: list of (start_sec, stop_sec, seg_type) for PD / NON_PD blocks
-        marks:    sorted np.ndarray of '*' discharge onset times (sec)
-    START/STOP pairs are matched sequentially in chronological order;
-    an unmatched START (no following STOP of the same type) is dropped.
-    """
     onsets = np.asarray(raw.annotations.onset, dtype=float)
     descs = [strip_prefix(d) for d in raw.annotations.description]
 
-    order = np.argsort(onsets)
+    order = np.argsort(onsets, kind="stable")
     onsets = onsets[order]
     descs = [descs[i] for i in order]
 
@@ -206,69 +110,129 @@ def parse_segments_and_marks(raw: mne.io.BaseRaw):
             marks.append(t)
 
     if open_seg is not None:
-        print(f"  [WARN] Unclosed {open_seg[0]} segment starting at {open_seg[1]:.2f}s — dropped")
+        print(f"  [WARN] Unclosed {open_seg[0]} segment at {open_seg[1]:.2f}s — dropped")
 
     return segments, np.sort(np.asarray(marks, dtype=float))
 
 
-def generate_windows_for_segment(data, sfreq, seg_start, seg_stop, seg_type, seg_id):
-    """
-    Sliding windows of WINDOW_SEC with STRIDE_SEC stride, kept only if
-    FULLY contained inside [seg_start, seg_stop] (strict containment,
-    no partial overlap allowed at segment edges).
-    """
-    win_len = int(round(WINDOW_SEC * sfreq))
-    stride = int(round(STRIDE_SEC * sfreq))
-    n_samples = data.shape[1]
+# =================================================
+# Channel prep -- determined ONCE from the full recording for consistency
+# =================================================
 
-    start_sample = int(round(seg_start * sfreq))
-    stop_sample = int(round(seg_stop * sfreq))
+def resolve_channel_set(raw_header: mne.io.BaseRaw) -> list[str]:
+    """Return the fixed list of standard EEG channels this recording provides,
+    in canonical order, so every segment yields identical feature dimensions."""
+    names = [ch.replace("EEG ", "").strip() for ch in raw_header.ch_names]
+    names = [OLD_TO_NEW_10_20.get(n, n) for n in names]
+    present = set(names)
+    eeg_present = [ch for ch in STANDARD_1020_CHANNELS if ch in present]
+    if not eeg_present:
+        raise RuntimeError("No standard 10-20 EEG channels found")
+    return eeg_present
 
-    windows, onsets, seg_types, seg_ids = [], [], [], []
-    s = start_sample
-    while s + win_len <= stop_sample and s + win_len <= n_samples:
-        windows.append(data[:, s:s + win_len])
-        onsets.append(s / sfreq)
-        seg_types.append(seg_type)
-        seg_ids.append(seg_id)
+
+def prep_channels(raw: mne.io.BaseRaw, keep: list[str]):
+    """Rename EEG prefix + old 10-20, pick the fixed set, set montage."""
+    raw.rename_channels(lambda ch: ch.replace("EEG ", "").strip())
+    raw.rename_channels({o: n for o, n in OLD_TO_NEW_10_20.items() if o in raw.ch_names})
+    raw.pick([ch for ch in keep if ch in raw.ch_names])
+    raw.reorder_channels(keep)
+    raw.set_montage(make_standard_montage("standard_1020"),
+                    match_case=False, on_missing="ignore")
+    return raw
+
+
+# =================================================
+# Per-segment preprocessing (band-first, then PyPREP)
+# =================================================
+
+def detect_bad_channels_pyprep(raw, random_state=42):
+    """deviation + correlation + ransac (NO hf_noise). Robust to failures."""
+    try:
+        nc = NoisyChannels(raw, random_state=random_state, do_detrend=False)
+        nc.find_bad_by_deviation()
+        nc.find_bad_by_correlation()
+        nc.find_bad_by_ransac(channel_wise=False)
+        return nc.get_bads()
+    except Exception as e:
+        print(f"    [WARN] PyPREP failed ({e}) — no interpolation for this segment")
+        return []
+
+
+def preprocess_segment_crop(raw_seg, keep_channels, random_state=42):
+    """crop already loaded -> band-pass -> PyPREP interp -> avg ref -> resample."""
+    prep_channels(raw_seg, keep_channels)
+
+    # Band FIRST so the effective band is exactly 0.5-40 (matches doc 12).
+    raw_seg.filter(l_freq=L_FREQ, h_freq=H_FREQ, method="fir", fir_design="firwin",
+                   phase="zero", verbose="ERROR")
+
+    # PyPREP on the band-passed signal at the ORIGINAL rate (better detection).
+    bads = detect_bad_channels_pyprep(raw_seg, random_state=random_state)
+    bads = [b for b in bads if b in raw_seg.ch_names]
+    raw_seg.info["bads"] = bads
+    if bads:
+        raw_seg.interpolate_bads(reset_bads=True)
+
+    # Average reference AFTER interpolation, then resample.
+    raw_seg.set_eeg_reference("average", verbose="ERROR")
+    raw_seg.resample(TARGET_SFREQ, npad="auto", verbose="ERROR")
+
+    data = raw_seg.get_data()
+    if not np.isfinite(data).all():
+        bad = [raw_seg.ch_names[i] for i in range(len(raw_seg.ch_names))
+               if not np.isfinite(data[i]).all()]
+        raise RuntimeError(f"Non-finite after preprocessing: {bad}")
+
+    return data, float(raw_seg.info["sfreq"]), bads
+
+
+def extract_segment_windows(raw_full, seg, rec_end, keep_channels, random_state=42):
+    seg_start, seg_stop, seg_type = seg
+    crop_tmin = max(0.0, seg_start - EDGE_PAD_SEC)
+    crop_tmax = min(rec_end, seg_stop + EDGE_PAD_SEC)
+    left_pad = seg_start - crop_tmin
+    if left_pad < EDGE_PAD_SEC or (crop_tmax - seg_stop) < EDGE_PAD_SEC:
+        print("    (near recording boundary — reduced padding)")
+
+    raw_seg = raw_full.copy().crop(tmin=crop_tmin, tmax=crop_tmax).load_data(verbose="ERROR")
+    data, sf, bads = preprocess_segment_crop(raw_seg, keep_channels, random_state)
+
+    # Core = the segment itself, padding removed (indices at target rate).
+    a = int(round(left_pad * sf))
+    b = a + int(round((seg_stop - seg_start) * sf))
+    data_core = data[:, a:b]
+
+    win_len = int(round(WINDOW_SEC * sf))
+    stride  = int(round(STRIDE_SEC * sf))
+    n = data_core.shape[1]
+
+    windows, onsets = [], []
+    s = 0
+    while s + win_len <= n:
+        windows.append(data_core[:, s:s + win_len])
+        onsets.append(seg_start + s / sf)   # absolute onset time
         s += stride
 
-    return windows, onsets, seg_types, seg_ids
-
-
-def label_windows(onsets, marks, window_sec):
-    """POSITIVE if a '*' mark falls inside [onset, onset + window_sec], else NEGATIVE."""
-    onsets = np.asarray(onsets, dtype=float)
-    marks = np.sort(np.asarray(marks, dtype=float))
-
-    labels = np.full(len(onsets), NEGATIVE, dtype=np.int8)
-    if marks.size == 0:
-        return labels
-
-    starts = onsets
-    ends = onsets + window_sec
-    lo = np.searchsorted(marks, starts, side="left")
-    hi = np.searchsorted(marks, ends, side="right")
-    labels[hi > lo] = POSITIVE
-    return labels
+    return windows, onsets, sf, bads
 
 
 # =================================================
-# Feature primitives (unchanged from the feature-extraction script)
+# Feature primitives (identical to doc 12)
 # =================================================
 
-def zero_crossings(x: np.ndarray) -> int:
+def zero_crossings(x):
     return int(np.sum((x[:-1] * x[1:]) < 0))
 
 
-def count_local_extrema(x: np.ndarray):
+def count_local_extrema(x):
     dx = np.diff(x)
     maxima = np.sum((dx[:-1] > 0) & (dx[1:] < 0))
     minima = np.sum((dx[:-1] < 0) & (dx[1:] > 0))
     return int(maxima), int(minima)
 
 
-def rms_amplitude(x: np.ndarray) -> float:
+def rms_amplitude(x):
     return float(np.sqrt(np.mean(x * x)))
 
 
@@ -316,15 +280,12 @@ def peak_frequency_in_band(f, psd, fmin, fmax):
 
 
 def freq_features_1d(x, fs, *, total_range=(1.0, 40.0), nperseg=None, noverlap=None):
-    bands = {
-        "delta": (1.0, 3.0), "theta": (4.0, 8.0),
-        "alpha": (9.0, 13.0), "beta": (14.0, 20.0),
-    }
+    bands = {"delta": (1.0, 3.0), "theta": (4.0, 8.0),
+             "alpha": (9.0, 13.0), "beta": (14.0, 20.0)}
     f, psd = compute_welch_psd_1d(x, fs=fs, nperseg=nperseg, noverlap=noverlap)
     tr0, tr1 = total_range
     total_p = bandpower_trapz(f, psd, tr0, tr1)
     peak_f = peak_frequency_in_band(f, psd, tr0, tr1)
-
     mean_feats, norm_feats = [], []
     eps = 1e-12
     for name in ("delta", "theta", "alpha", "beta"):
@@ -337,18 +298,15 @@ def freq_features_1d(x, fs, *, total_range=(1.0, 40.0), nperseg=None, noverlap=N
 
 
 def extract_features_for_one_window(window_2d, fs):
-    n_ch = window_2d.shape[0]
     feats = []
-    for ch in range(n_ch):
+    for ch in range(window_2d.shape[0]):
         x = window_2d[ch].astype(float)
         x = x - np.mean(x)
-
         zc = zero_crossings(x)
         mx, mn = count_local_extrema(x)
         rms = rms_amplitude(x)
         sk = float(skew(x, bias=False))
         ku = float(kurtosis(x, fisher=True, bias=False))
-
         ffeats = freq_features_1d(x, fs)
         feats.extend([zc, mx, mn, rms, sk, ku, *ffeats])
     return np.asarray(feats, dtype=np.float32)
@@ -356,11 +314,9 @@ def extract_features_for_one_window(window_2d, fs):
 
 def feature_names(ch_names):
     per_ch_time = ["zero_cross", "maxima", "minima", "rms", "skew", "kurt_excess"]
-    per_ch_freq = [
-        "total_power_1_40", "peak_freq_1_40",
-        "mean_band_delta", "mean_band_theta", "mean_band_alpha", "mean_band_beta",
-        "norm_band_delta", "norm_band_theta", "norm_band_alpha", "norm_band_beta",
-    ]
+    per_ch_freq = ["total_power_1_40", "peak_freq_1_40",
+                   "mean_band_delta", "mean_band_theta", "mean_band_alpha", "mean_band_beta",
+                   "norm_band_delta", "norm_band_theta", "norm_band_alpha", "norm_band_beta"]
     names = []
     for ch in ch_names:
         for f in per_ch_time:
@@ -370,37 +326,67 @@ def feature_names(ch_names):
     return names
 
 
+def label_windows(onsets, marks, window_sec):
+    onsets = np.asarray(onsets, dtype=float)
+    marks = np.sort(np.asarray(marks, dtype=float))
+    labels = np.full(len(onsets), NEGATIVE, dtype=np.int8)
+    if marks.size == 0:
+        return labels
+    lo = np.searchsorted(marks, onsets, side="left")
+    hi = np.searchsorted(marks, onsets + window_sec, side="right")
+    labels[hi > lo] = POSITIVE
+    return labels
+
+
 # =================================================
-# Per-file pipeline: preprocess -> segment-restricted windows -> features
+# Per-file pipeline
 # =================================================
 
-def process_file(edf_path: Path, report: dict, out_path: Path, batch_windows: int = 512):
-    raw, bad_chs = preprocess_raw(edf_path, report)
-    data = raw.get_data()
-    ch_names = raw.ch_names
-    sfreq = float(raw.info["sfreq"])
+def process_file(edf_path: Path, out_path: Path, batch_windows: int = 512):
+    raw_full = mne.io.read_raw_edf(str(edf_path), preload=False, verbose="ERROR")
+    rec_end = float(raw_full.times[-1])
 
-    segments, marks = parse_segments_and_marks(raw)
+    keep_channels = resolve_channel_set(raw_full)
+    print(f"  channels ({len(keep_channels)}): {keep_channels}")
+
+    segments, marks = parse_segments_and_marks(raw_full)
     if not segments:
-        print("  (no PD_START/PD_STOP or NON_PD_START/NON_PD_STOP segments — skipped)")
+        print("  (no PD/NON_PD segments — skipped)")
         return
 
     all_windows, all_onsets, all_types, all_segids = [], [], [], []
-    for seg_id, (seg_start, seg_stop, seg_type) in enumerate(segments):
-        w, o, t, sid = generate_windows_for_segment(data, sfreq, seg_start, seg_stop, seg_type, seg_id)
-        all_windows.extend(w)
-        all_onsets.extend(o)
-        all_types.extend(t)
-        all_segids.extend(sid)
+    bad_lists, bad_seg_ids = [], []
+    sfreq = None
+
+    for seg_id, seg in enumerate(segments):
+        seg_start, seg_stop, seg_type = seg
+        print(f"  [seg {seg_id:02d}] {seg_type:6s} {seg_start:.1f}-{seg_stop:.1f}s "
+              f"({seg_stop - seg_start:.1f}s)")
+        try:
+            windows, onsets, sf, bads = extract_segment_windows(
+                raw_full, seg, rec_end, keep_channels)
+        except Exception as e:
+            print(f"    ERROR in segment — skipped ({e})")
+            continue
+        if not windows:
+            print("    (shorter than one window — skipped)")
+            continue
+        sfreq = sf
+        all_windows.extend(windows)
+        all_onsets.extend(onsets)
+        all_types.extend([seg_type] * len(windows))
+        all_segids.extend([seg_id] * len(windows))
+        bad_lists.append(np.array(bads, dtype=object))
+        bad_seg_ids.append(seg_id)
+        print(f"    windows={len(windows)}  bad_channels={bads}")
 
     if not all_windows:
-        print("  (segments found but no full-length windows fit inside them — skipped)")
+        print("  (no windows produced — skipped)")
         return
 
     windows = np.stack(all_windows)
     onsets = np.asarray(all_onsets, dtype=np.float64)
-
-    order = np.argsort(onsets)
+    order = np.argsort(onsets, kind="stable")
     windows = windows[order]
     onsets = onsets[order]
     seg_types_arr = np.asarray(all_types, dtype=object)[order]
@@ -408,15 +394,13 @@ def process_file(edf_path: Path, report: dict, out_path: Path, batch_windows: in
 
     labels = label_windows(onsets, marks, WINDOW_SEC)
 
-    n_windows = windows.shape[0]
-    fnames = feature_names(ch_names)
-    X = np.empty((n_windows, len(fnames)), dtype=np.float32)
-
-    for start in range(0, n_windows, batch_windows):
-        end = min(start + batch_windows, n_windows)
+    fnames = feature_names(keep_channels)
+    X = np.empty((len(windows), len(fnames)), dtype=np.float32)
+    for start in range(0, len(windows), batch_windows):
+        end = min(start + batch_windows, len(windows))
         for i in range(start, end):
             X[i] = extract_features_for_one_window(windows[i], sfreq)
-        print(f"  features [{end}/{n_windows}]")
+        print(f"  features [{end}/{len(windows)}]")
 
     n_pos = int((labels == POSITIVE).sum())
     n_neg = int((labels == NEGATIVE).sum())
@@ -429,7 +413,7 @@ def process_file(edf_path: Path, report: dict, out_path: Path, batch_windows: in
         X=X,
         y=labels,
         labels=labels,
-        ch_names=np.array(ch_names, dtype=object),
+        ch_names=np.array(keep_channels, dtype=object),
         feature_names=np.array(fnames, dtype=object),
         window_onsets_sec=onsets,
         segment_type=seg_types_arr,
@@ -438,33 +422,29 @@ def process_file(edf_path: Path, report: dict, out_path: Path, batch_windows: in
         sfreq=sfreq,
         window_sec=WINDOW_SEC,
         stride_sec=STRIDE_SEC,
-        bad_channels=np.array(bad_chs, dtype=object),
+        bad_channels=np.array(bad_lists, dtype=object),
+        bad_channels_segment_id=np.array(bad_seg_ids, dtype=np.int64),
         source_edf=edf_path.name,
     )
     print(f"  Saved: {out_path} | X={X.shape} | POSITIVE={n_pos} NEGATIVE={n_neg} | "
           f"marks={len(marks)} | PD_segs={n_pd_seg} NON_PD_segs={n_nonpd_seg}")
 
 
-# =================================================
-# Main
-# =================================================
-
 def main():
-    report = parse_channel_detection_report(REPORT_PATH)
-
     edf_files = sorted(DATA_DIR.glob("*.edf"))
     if not edf_files:
         raise RuntimeError(f"No *.edf files in {DATA_DIR}")
 
     print(f"Found {len(edf_files)} EDF files")
-    print(f"Window: {WINDOW_SEC}s, stride: {STRIDE_SEC}s (overlap={OVERLAP*100:.0f}%)")
-    print("Windows are kept only if fully inside a PD or NON_PD segment.\n")
+    print(f"Band {L_FREQ}-{H_FREQ}Hz, {TARGET_SFREQ:.0f}Hz, window {WINDOW_SEC}s "
+          f"stride {STRIDE_SEC}s, pad {EDGE_PAD_SEC}s")
+    print("Per-segment PyPREP (deviation/correlation/ransac, no hf_noise).\n")
 
     for edf_path in edf_files:
         print(f"[{edf_path.stem}]")
         out_path = OUT_DIR / f"{edf_path.stem}_features.npz"
         try:
-            process_file(edf_path, report, out_path)
+            process_file(edf_path, out_path)
         except Exception as e:
             print(f"  ERROR: {e}")
 

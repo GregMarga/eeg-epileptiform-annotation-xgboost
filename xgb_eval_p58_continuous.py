@@ -11,7 +11,7 @@ Configure the flags below:
 # -------------------------------------------------
 # *** CONFIGURE HERE ***
 # -------------------------------------------------
-MODE = "handcrafted"   # "handcrafted" | "labram"
+MODE = "labram"   # "handcrafted" | "labram"
 THR  = 0.5
 # -------------------------------------------------
 
@@ -45,7 +45,7 @@ TRAIN_LABRAM_DIR      = Path("../../../data/labram_embeddings_1s_new")
 # handcrafted features per channel, same layout as the training features:
 # X is (n_windows, n_channels*16), channel-major, 16 feats per channel).
 # No loader changes are needed — the format is identical to before.
-EVAL_HANDCRAFTED_DIR  = Path("../../../data/evaluation_recordings/features_1s_labeled")
+EVAL_HANDCRAFTED_DIR = Path("../../../data/evaluation_recordings/features_1s_labeled_persegment")
 EVAL_LABRAM_DIR       = Path("../../../data/evaluation_recordings/labeled")
 
 EVAL_PATIENT_ID = "P58"
