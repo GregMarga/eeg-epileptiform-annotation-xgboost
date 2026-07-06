@@ -40,6 +40,11 @@ from sklearn.metrics import (
 TRAIN_HANDCRAFTED_DIR = Path("../../../data/80hz_freq_time_features_pyprep_1s")
 TRAIN_LABRAM_DIR      = Path("../../../data/labram_embeddings_1s_new")
 
+# EVAL_HANDCRAFTED_DIR is the OUT_DIR written by extract_features_from_raw.py
+# (preprocess -> PD/NON_PD-segment-restricted sliding windows -> 16-dim
+# handcrafted features per channel, same layout as the training features:
+# X is (n_windows, n_channels*16), channel-major, 16 feats per channel).
+# No loader changes are needed — the format is identical to before.
 EVAL_HANDCRAFTED_DIR  = Path("../../../data/evaluation_recordings/features_1s_labeled")
 EVAL_LABRAM_DIR       = Path("../../../data/evaluation_recordings/labeled")
 
