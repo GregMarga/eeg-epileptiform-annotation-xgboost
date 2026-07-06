@@ -20,7 +20,7 @@ from sklearn.metrics import (
 # -------------------------------------------------
 # Labeled handcrafted features produced by the feature-extraction script
 # (keys: X, y [1/0/-1], segment_type, ch_names, ...).
-FEATURES_DIR = Path("../../../data/evaluation_recordings/features_1s_labeled")
+FEATURES_DIR = Path("../../../data/evaluation_recordings/features_1s_labeled_persegment")
 
 CSV_OUTPUT = Path("results_active_learning_eval_handcrafted.csv")
 
@@ -42,6 +42,13 @@ DECISION_THRESHOLD = 0.4
 IGNORE_LABEL = -1
 PD, NON_PD = "PD", "NON_PD"
 
+# If True, the active-learning POOL (the windows eligible to be picked for
+# labeling) contains negatives from NON_PD segments only. The TEST set is
+# unaffected and keeps ALL negatives (PD-segment + NON_PD) for a realistic
+# evaluation distribution. This restriction lives in make_splits and applies
+# equally to the active and random strategies (both draw from the same pool).
+POOL_NEG_NONPD_ONLY = True
+
 
 # -------------------------------------------------
 # Loading: handcrafted features, averaged across channels, ignore dropped
@@ -53,6 +60,9 @@ def load_labeled_recording(path: Path):
     X   : (N, 16) handcrafted features averaged across channels
     y   : (N,)    binary labels (1 = discharge, 0 = background)
     seg : (N,)    segment type per window ("PD" / "NON_PD")
+
+    All windows are kept here (including PD-segment negatives); the NON_PD
+    pool restriction is applied later, in make_splits.
     """
     z = np.load(path, allow_pickle=True)
     X = z["X"].astype(np.float32)
@@ -143,15 +153,25 @@ def make_splits(y, seg, rng, test_frac, min_test_per_class):
     n_test_pos = min(n_test_pos, len(pos) - 2)
     n_test_neg = min(n_test_neg, len(neg) - 2)
 
+    # TEST set uses ALL negatives (PD-segment + NON_PD) -> realistic distribution.
     test_idx = np.concatenate([pos[:n_test_pos], neg[:n_test_neg]])
     pool_pos = pos[n_test_pos:]
-    pool_neg = neg[n_test_neg:]
+    leftover_neg = neg[n_test_neg:]
+
+    # POOL negatives: only NON_PD-segment ones are eligible to be labeled.
+    # Leftover PD-segment negatives are neither in test nor selectable -> dropped
+    # from the pool. Applies equally to active and random (shared pool).
+    if POOL_NEG_NONPD_ONLY:
+        pool_neg = np.array([int(i) for i in leftover_neg if seg[i] == NON_PD], dtype=int)
+    else:
+        pool_neg = leftover_neg
+
+    # Need at least one selectable positive and one NON_PD negative for the seeds.
+    if len(pool_pos) < 1 or len(pool_neg) < 1:
+        return None
 
     pos_seed = int(pool_pos[0])
-
-    # First negative seed must come from a NON_PD segment.
-    nonpd_neg = [int(i) for i in pool_neg if seg[i] == NON_PD]
-    neg_seed = nonpd_neg[0] if nonpd_neg else int(pool_neg[0])
+    neg_seed = int(pool_neg[0])   # guaranteed NON_PD when POOL_NEG_NONPD_ONLY
 
     seed_idx = np.array([pos_seed, neg_seed])
     pool_idx = np.concatenate([pool_pos, pool_neg])
@@ -346,7 +366,8 @@ def main():
         print(f"{stem}: windows={len(y)} | pos={int(y.sum())} | neg={int((y == 0).sum())} "
               f"(NON_PD negs={n_nonpd_neg})")
 
-    print(f"\nStrategies: {STRATEGIES} | Repeats: {N_REPEATS} | Budgets: {BUDGET_RANGE}\n")
+    print(f"\nStrategies: {STRATEGIES} | Repeats: {N_REPEATS} | Budgets: {BUDGET_RANGE}")
+    print(f"Pool negatives NON_PD-only (test keeps all negatives): {POOL_NEG_NONPD_ONLY}\n")
 
     rows = run_active_learning(recordings)
 
