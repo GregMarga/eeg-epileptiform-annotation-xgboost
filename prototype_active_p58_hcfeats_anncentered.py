@@ -19,12 +19,19 @@ from sklearn.metrics import (
 # Paths
 # -------------------------------------------------
 # Same folder holds two datasets per recording:
-#   POOL : annotation-centered windows  -> "{stem}_annot_centered.npz"
-#   TEST : dense sliding windows        -> "{stem}_features.npz"
-# The active-learning pool draws from the annotation-centered set (clean, mark-
-# centered examples, like a clinician pointing at discharges). Evaluation runs on
-# ALL sliding windows (realistic continuous scan). The two are independent arrays
-# with NO shared indices.
+#   annotation-centered -> "{stem}_annot_centered.npz"  (only '*' positives;
+#                          there are no '-' marks, so this file has 0 negatives)
+#   sliding             -> "{stem}_features.npz"         (dense windows, both
+#                          mark-in-window positives and background negatives)
+#
+# POOL is built from TWO sources:
+#   positives -> annotation-centered '*' windows (clean, mark at center)
+#   negatives -> NON_PD sliding negatives (nothing to center on background)
+# TEST = ALL sliding windows (realistic continuous scan).
+#
+# Note: pool negatives are a subset of the sliding TEST windows, so the few
+# labeled negatives (<= budget/2) overlap the test set -> negligible leakage on
+# the negative side (a handful of windows out of thousands).
 FEATURES_DIR = Path("../../../data/evaluation_recordings/features_1s_labeled_persegment")
 POOL_SUFFIX  = "_annot_centered.npz"
 TEST_SUFFIX  = "_features.npz"
@@ -345,15 +352,32 @@ def main():
             print(f"  [SKIP] no sliding test file for {stem} ({test_path.name})")
             continue
 
-        X_pool, y_pool, seg_pool = load_labeled_recording(pool_path)
-        X_test, y_test, _        = load_labeled_recording(test_path)
+        # Positives: annotation-centered '*' windows.
+        X_ann, y_ann, seg_ann = load_labeled_recording(pool_path)
+        pos_mask = y_ann == 1
+
+        # Sliding set: used for the TEST (all windows) and as the source of the
+        # POOL negatives (segment filtering to NON_PD happens in make_pool).
+        X_sl, y_sl, seg_sl = load_labeled_recording(test_path)
+        neg_mask = y_sl == 0
+
+        # Build the pool: annot positives + sliding negatives.
+        X_pool = np.concatenate([X_ann[pos_mask], X_sl[neg_mask]], axis=0)
+        y_pool = np.concatenate([
+            np.ones(int(pos_mask.sum()), dtype=np.uint8),
+            np.zeros(int(neg_mask.sum()), dtype=np.uint8),
+        ])
+        seg_pool = np.concatenate([seg_ann[pos_mask], seg_sl[neg_mask]])
+
+        # Test = all sliding windows.
+        X_test, y_test = X_sl, y_sl
         recordings[stem] = (X_pool, y_pool, seg_pool, X_test, y_test)
 
         pool_nonpd_neg = int(np.sum((y_pool == 0) & (seg_pool == NON_PD)))
         print(f"{stem}:")
-        print(f"  POOL (annot-centered): n={len(y_pool)} pos={int(y_pool.sum())} "
-              f"neg={int((y_pool == 0).sum())} (NON_PD negs={pool_nonpd_neg})")
-        print(f"  TEST (sliding):        n={len(y_test)} pos={int(y_test.sum())} "
+        print(f"  POOL: n={len(y_pool)} pos={int(y_pool.sum())} (annot-centered) "
+              f"neg={int((y_pool == 0).sum())} sliding (NON_PD negs={pool_nonpd_neg})")
+        print(f"  TEST (sliding): n={len(y_test)} pos={int(y_test.sum())} "
               f"neg={int((y_test == 0).sum())}")
 
     if not recordings:
