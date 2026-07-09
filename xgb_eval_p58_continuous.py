@@ -3,16 +3,16 @@ xgb_eval_p58.py
 ================
 Train XGBoost on all patients EXCEPT P58, evaluate on P58.
 
-Configure the flags below:
-  MODE : "handcrafted" | "labram"
+Runs BOTH modes ("handcrafted" and "labram") in a single execution and
+plots the results side-by-side as two subplots in one combined figure.
+
   THR  : decision threshold for the positive class
 """
 
 # -------------------------------------------------
 # *** CONFIGURE HERE ***
 # -------------------------------------------------
-MODE = "labram"   # "handcrafted" | "labram"
-THR  = 0.5
+THR = 0.5
 # -------------------------------------------------
 
 import re
@@ -204,92 +204,46 @@ def evaluate(y_true, y_proba, thr: float = 0.5) -> dict[str, float]:
 
 
 # -------------------------------------------------
-# Plot
+# Mode-specific data loading configuration
 # -------------------------------------------------
 
-def plot_results(m: dict, train_patients: list[str], mode: str, thr: float):
-    mode_label = (
-        "Handcrafted features (per-patient z-score)"
-        if mode == "handcrafted"
-        else "LaBraM embeddings"
-    )
-
-    metrics = [
-        ("bacc",    "Balanced Accuracy"),
-        ("roc_auc", "ROC AUC"),
-        ("f1",      "F1"),
-        ("pr_auc",  "PR AUC"),
-    ]
-    values = [m[k] for k, _ in metrics]
-    labels = [label for _, label in metrics]
-
-    fig, ax = plt.subplots(figsize=(8, 5))
-    bars = ax.bar(labels, values, color=["tab:blue", "tab:orange", "tab:green", "tab:purple"])
-    ax.set_ylim(0.0, 1.0)
-    ax.set_ylabel("Score")
-    ax.set_title(
-        f"XGBoost — train: {', '.join(train_patients)}\n"
-        f"test: {EVAL_PATIENT_ID} ({PATIENT_PATTERN.get(EVAL_PATIENT_ID, '?')}) — {mode_label}",
-        fontsize=9,
-    )
-    ax.grid(axis="y", alpha=0.3)
-    for bar, val in zip(bars, values):
-        ax.text(
-            bar.get_x() + bar.get_width() / 2,
-            val + 0.02,
-            f"{val:.3f}",
-            ha="center", va="bottom", fontsize=10,
+def _mode_config(mode: str):
+    if mode == "handcrafted":
+        return dict(
+            train_dir=TRAIN_HANDCRAFTED_DIR,
+            eval_dir=EVAL_HANDCRAFTED_DIR,
+            suffix_train="_features.npz",
+            suffix_eval="_features.npz",
+            load_patient=load_patient_handcrafted,
+            feature_names=FEATURE_NAMES_16,
+            n_features=len(FEATURE_NAMES_16),
+        )
+    else:
+        return dict(
+            train_dir=TRAIN_LABRAM_DIR,
+            eval_dir=EVAL_LABRAM_DIR,
+            suffix_train="_embeddings.npz",
+            suffix_eval="_embeddings_labeled.npz",
+            load_patient=load_patient_labram,
+            feature_names=None,
+            n_features=None,
         )
 
-    confusion_text = (
-        f"TP={int(m['tp'])}  FP={int(m['fp'])}  "
-        f"TN={int(m['tn'])}  FN={int(m['fn'])}  |  thr={thr}"
-    )
-    fig.text(0.5, 0.01, confusion_text, ha="center", fontsize=9, color="dimgray")
-    fig.tight_layout(rect=[0, 0.04, 1, 1])
 
-    plot_path = f"results_xgb_eval_p58_{mode}.png"
-    plt.savefig(plot_path, dpi=150)
-    print(f"Plot saved to: {plot_path}")
-    plt.show()
+def run_mode(mode: str, thr: float):
+    """Run the full train/eval pipeline for a single mode.
 
-
-# -------------------------------------------------
-# Main
-# -------------------------------------------------
-
-def main():
-    mode = MODE.strip().lower()
-    thr  = THR
-
-    assert mode in ("handcrafted", "labram"), \
-        f"MODE must be 'handcrafted' or 'labram', got '{mode}'"
+    Returns (metrics_dict, train_patients, imp_vec, feature_names).
+    """
+    cfg = _mode_config(mode)
 
     print(f"\n{'='*60}")
     print(f"  Mode : {mode.upper()}")
     print(f"  Test : {EVAL_PATIENT_ID}  |  threshold : {thr}")
     print(f"{'='*60}")
 
-    # ---- mode-specific setup ----
-    if mode == "handcrafted":
-        train_dir    = TRAIN_HANDCRAFTED_DIR
-        eval_dir     = EVAL_HANDCRAFTED_DIR
-        suffix_train = "_features.npz"
-        suffix_eval  = "_features.npz"
-        load_patient = load_patient_handcrafted
-        feature_names = FEATURE_NAMES_16
-        n_features    = len(FEATURE_NAMES_16)
-    else:
-        train_dir    = TRAIN_LABRAM_DIR
-        eval_dir     = EVAL_LABRAM_DIR
-        suffix_train = "_embeddings.npz"
-        suffix_eval  = "_embeddings_labeled.npz"
-        load_patient = load_patient_labram
-        feature_names = None
-        n_features    = None
-
     # ---- build train index (all patients except P58) ----
-    train_index = build_patient_index(train_dir, suffix_train)
+    train_index = build_patient_index(cfg["train_dir"], cfg["suffix_train"])
     train_index.pop(EVAL_PATIENT_ID, None)
     train_patients = sorted(train_index.keys())
     print(f"Train patients ({len(train_patients)}): {train_patients}")
@@ -297,7 +251,7 @@ def main():
     # ---- load and concatenate all train data ----
     xs, ys = [], []
     for pid in train_patients:
-        x, y = load_patient(train_index[pid])
+        x, y = cfg["load_patient"](train_index[pid])
         xs.append(x); ys.append(y)
         print(f"  {pid}: windows={len(y)}  pos={int(y.sum())}  neg={int((y==0).sum())}")
 
@@ -307,19 +261,21 @@ def main():
           f"neg={int((y_train==0).sum())}")
 
     # ---- infer embedding dim for LaBraM ----
+    n_features = cfg["n_features"]
+    feature_names = cfg["feature_names"]
     if n_features is None:
         n_features    = X_train.shape[1]
         feature_names = [f"f{i}" for i in range(n_features)]
         print(f"LaBraM embedding dim: {n_features}")
 
     # ---- load eval (P58) ----
-    eval_index = build_patient_index(eval_dir, suffix_eval)
+    eval_index = build_patient_index(cfg["eval_dir"], cfg["suffix_eval"])
     if EVAL_PATIENT_ID not in eval_index:
         raise RuntimeError(
-            f"Eval patient {EVAL_PATIENT_ID} not found in {eval_dir} "
-            f"(suffix={suffix_eval})"
+            f"Eval patient {EVAL_PATIENT_ID} not found in {cfg['eval_dir']} "
+            f"(suffix={cfg['suffix_eval']})"
         )
-    X_eval, y_eval = load_patient(eval_index[EVAL_PATIENT_ID])
+    X_eval, y_eval = cfg["load_patient"](eval_index[EVAL_PATIENT_ID])
     print(f"\nTest  ({EVAL_PATIENT_ID}): windows={len(y_eval)}  "
           f"pos={int(y_eval.sum())}  neg={int((y_eval==0).sum())}")
 
@@ -331,7 +287,7 @@ def main():
     y_proba = model.predict_proba(X_eval)[:, 1]
     m = evaluate(y_eval, y_proba, thr=thr)
 
-    print(f"\n=== Results on {EVAL_PATIENT_ID} ===")
+    print(f"\n=== Results on {EVAL_PATIENT_ID} ({mode}) ===")
     for k in ["acc", "bacc", "f1", "precision", "recall", "roc_auc", "pr_auc"]:
         print(f"  {k:>10}: {m[k]:.4f}")
     print(f"\n  TP={int(m['tp'])}  FP={int(m['fp'])}  "
@@ -354,8 +310,87 @@ def main():
         writer.writerow({k: m[k] for k in keys})
     print(f"\nResults saved to: {csv_path}")
 
-    # ---- plot ----
-    plot_results(m, train_patients, mode, thr)
+    return m, train_patients, imp_vec, feature_names
+
+
+# -------------------------------------------------
+# Plot (combined, one subplot per mode)
+# -------------------------------------------------
+
+def _plot_single_ax(ax, m: dict, train_patients: list[str], mode: str, thr: float):
+    mode_label = (
+        "Handcrafted features"
+        if mode == "handcrafted"
+        else "LaBraM embeddings"
+    )
+
+    metrics = [
+        ("bacc",    "Balanced Accuracy"),
+        ("roc_auc", "ROC AUC"),
+        ("f1",      "F1"),
+        ("pr_auc",  "PR AUC"),
+    ]
+    values = [m[k] for k, _ in metrics]
+    labels = [label for _, label in metrics]
+
+    bars = ax.bar(labels, values, color=["tab:blue", "tab:orange", "tab:green", "tab:purple"])
+    ax.set_ylim(0.0, 1.0)
+    ax.set_ylabel("Score")
+    ax.set_title(
+        f"train: {', '.join(train_patients)}\n"
+        f"test: {EVAL_PATIENT_ID} ({PATIENT_PATTERN.get(EVAL_PATIENT_ID, '?')}) — {mode_label}",
+        fontsize=9,
+    )
+    ax.grid(axis="y", alpha=0.3)
+    for bar, val in zip(bars, values):
+        ax.text(
+            bar.get_x() + bar.get_width() / 2,
+            val + 0.02,
+            f"{val:.3f}",
+            ha="center", va="bottom", fontsize=10,
+        )
+
+    confusion_text = (
+        f"TP={int(m['tp'])}  FP={int(m['fp'])}  "
+        f"TN={int(m['tn'])}  FN={int(m['fn'])}  |  thr={thr}"
+    )
+    ax.text(
+        0.5, -0.18, confusion_text,
+        ha="center", va="top", fontsize=9, color="dimgray",
+        transform=ax.transAxes,
+    )
+
+
+def plot_results_combined(
+    m_handcrafted: dict, train_patients_hc: list[str],
+    m_labram: dict, train_patients_lb: list[str],
+    thr: float,
+):
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5.5))
+
+    _plot_single_ax(axes[0], m_handcrafted, train_patients_hc, "handcrafted", thr)
+    _plot_single_ax(axes[1], m_labram, train_patients_lb, "labram", thr)
+
+    fig.suptitle(f"XGBoost — baseline evaluation on {EVAL_PATIENT_ID}", fontsize=12)
+    fig.tight_layout(rect=[0, 0.05, 1, 0.95])
+
+    plot_path = "results_xgb_eval_p58_combined.png"
+    plt.savefig(plot_path, dpi=150)
+    print(f"\nCombined plot saved to: {plot_path}")
+    plt.show()
+
+
+# -------------------------------------------------
+# Main
+# -------------------------------------------------
+
+def main():
+    thr = THR
+
+    m_hc, train_patients_hc, _, _ = run_mode("handcrafted", thr)
+    m_lb, train_patients_lb, _, _ = run_mode("labram", thr)
+
+    plot_results_combined(m_hc, train_patients_hc, m_lb, train_patients_lb, thr)
 
 
 if __name__ == "__main__":
