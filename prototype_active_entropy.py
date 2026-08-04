@@ -67,6 +67,7 @@ MIN_TEST_PER_CLASS = 3      # minimum test samples per class
 DECISION_THRESHOLD = 0.4    # same threshold as evaluate()
 
 CSV_OUTPUT = Path("results_active_learning.csv")
+FIG_OUTPUT = Path("fig8_active_vs_random_paired.pdf")
 
 
 def patient_from_filename(name: str) -> str | None:
@@ -381,54 +382,76 @@ def run_active_learning(recordings, emb_index, feat_index):
 
 
 # -------------------------------------------------
-# Plotting: 1 figure, 2 subplots (bacc / roc_auc vs budget), strategies overlaid
+# Plotting: 1 figure, 2 subplots (bacc / roc_auc), BOTH representations overlaid
 # -------------------------------------------------
+# Supervisor's note: put LaBraM and handcrafted on the SAME plot; splitting by
+# metric (bacc vs roc_auc) is fine. So each subplot now shows 4 curves with a
+# double encoding (same idea as Figure 6):
+#     colour     -> representation (handcrafted vs LaBraM)
+#     line/marker -> strategy       (active = solid/o, random = dashed/x)
 
+REPR_COLOR = {
+    "handcrafted": "tab:blue",
+    "labram":      "tab:red",
+}
 STRATEGY_STYLE = {
-    "active": dict(color="tab:blue", label="Active (uncertainty + density)"),
-    "random": dict(color="tab:gray", label="Random baseline"),
+    "active": dict(linestyle="-",  marker="o", label="Active (unc.+dens.)"),
+    "random": dict(linestyle="--", marker="x", label="Random"),
 }
 
 
-def plot_curves(results):
-    """2x2 grid: rows = feature mode (handcrafted / labram), cols = metric (bacc / roc_auc)."""
+def plot_curves(results, out_path: Path = FIG_OUTPUT):
     metrics = [("bacc", "Balanced accuracy"), ("roc_auc", "ROC AUC")]
     feature_modes = [m for m in FEATURE_MODES if m in results]
 
-    n_rows = len(feature_modes)
-    n_cols = len(metrics)
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(13, 9), sharex=True)
-    axes = np.atleast_2d(axes)
+    fig, axes = plt.subplots(1, len(metrics), figsize=(13, 5.2), sharex=True, sharey=True)
+    axes = np.atleast_1d(axes)
 
-    for r, fmode in enumerate(feature_modes):
-        rows = results[fmode]
-        by_strategy = {s: [x for x in rows if x["strategy"] == s] for s in STRATEGIES}
-
-        for c, (metric, ylabel) in enumerate(metrics):
-            ax = axes[r, c]
+    for c, (metric, ylabel) in enumerate(metrics):
+        ax = axes[c]
+        for fmode in feature_modes:
+            rows = results[fmode]
+            by_strategy = {s: [x for x in rows if x["strategy"] == s] for s in STRATEGIES}
             for strategy in STRATEGIES:
                 srows = sorted(by_strategy[strategy], key=lambda x: x["n_shot"])
                 xs = np.array([x["n_shot"] for x in srows])
                 means = np.array([x[metric] for x in srows], dtype=float)
                 stds = np.array([x[f"{metric}_std"] for x in srows], dtype=float)
 
-                style = STRATEGY_STYLE[strategy]
-                ax.plot(xs, means, marker="o", color=style["color"], label=style["label"])
-                ax.fill_between(xs, means - stds, means + stds, alpha=0.15, color=style["color"])
+                col = REPR_COLOR[fmode]
+                st = STRATEGY_STYLE[strategy]
+                label = f"{FEATURE_MODE_TITLE[fmode]} — {st['label']}"
 
-            ax.set_title(f"{FEATURE_MODE_TITLE[fmode]} — {ylabel}")
-            ax.set_ylim(0.0, 1.0)
-            # Integer n_shot ticks (every 2) with natural meaning.
-            ax.xaxis.set_major_locator(MultipleLocator(2))
-            ax.grid(alpha=0.3)
-            ax.legend()
-            if c == 0:
-                ax.set_ylabel(ylabel)
-            if r == n_rows - 1:
-                ax.set_xlabel("n_shot (labels per class equivalent)")
+                ax.plot(
+                    xs, means, color=col,
+                    linestyle=st["linestyle"], marker=st["marker"], markersize=5,
+                    linewidth=1.8, label=label,
+                )
+                ax.fill_between(xs, means - stds, means + stds, alpha=0.12, color=col)
 
-    fig.suptitle("Active learning vs random sampling (prototypical few-shot)")
-    fig.tight_layout()
+        ax.set_title(ylabel)
+        ax.set_ylim(0.0, 1.0)
+        ax.xaxis.set_major_locator(MultipleLocator(2))
+        ax.grid(alpha=0.3)
+        ax.set_xlabel("n_shot (labels per class equivalent)")
+        if c == 0:
+            ax.set_ylabel("Score")
+
+    # One shared legend below both subplots (4 entries, grouped 2 per row).
+    handles, labels = axes[0].get_legend_handles_labels()
+    fig.legend(
+        handles, labels, loc="lower center", ncol=2,
+        frameon=True, bbox_to_anchor=(0.5, 0.0),
+        columnspacing=1.5, handletextpad=0.6,
+    )
+
+    fig.suptitle("Active learning vs random sampling (prototypical few-shot): Handcrafted vs LaBraM")
+    # Reserve room for the bottom legend + suptitle (tight_layout ignores fig.legend).
+    fig.subplots_adjust(left=0.07, right=0.98, top=0.90, bottom=0.22, wspace=0.10)
+
+    fig.savefig(out_path, bbox_inches="tight")
+    fig.savefig(out_path.with_suffix(".png"), dpi=200, bbox_inches="tight")
+    print(f"\nSaved figure to {out_path} and {out_path.with_suffix('.png')}")
 
 
 # -------------------------------------------------

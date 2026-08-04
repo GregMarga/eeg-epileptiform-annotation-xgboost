@@ -12,8 +12,9 @@ acquisition function, budgets, repeats, metrics). The only per-representation
 differences are: how a recording is loaded, whether the prototypical classifier
 standardizes, and whether the density is computed in raw or standardized space.
 
-Output: one figure with 4 subplots — rows = representation, cols = metric
-(balanced accuracy, ROC AUC) — plus one CSV per representation.
+Output: ONE figure with 2 subplots — cols = metric (balanced accuracy, ROC AUC).
+Both representations are drawn on the SAME axes (colour = representation,
+line style = strategy), plus one CSV per representation.
 """
 
 import csv
@@ -411,79 +412,98 @@ def _register_recording(recordings, stem, X_ann, seg_ann, pos_mask,
 # -------------------------------------------------
 # Representation registry
 # -------------------------------------------------
+# `color` is the representation's colour in the combined plot (colour encodes
+# representation; line style encodes strategy).
 
 REPRESENTATIONS = {
     "handcrafted": dict(
-        title="Handcrafted features",
+        title="Handcrafted",
         build=build_handcrafted_recordings,
         standardize=True,
         csv=Path("results_active_learning_annotpool_slidingtest.csv"),
-        active_color="tab:orange",
+        color="tab:orange",
     ),
     "labram": dict(
-        title="LaBraM embeddings",
+        title="LaBraM",
         build=build_labram_recordings,
         standardize=False,
         csv=Path("results_active_learning_labram_annotpool_slidingtest.csv"),
-        active_color="tab:blue",
+        color="tab:blue",
     ),
 }
 
+# Strategy -> line style / marker (shared across representations).
+STRATEGY_STYLE = {
+    "active": dict(linestyle="-",  marker="o", label="Active (unc.+dens.)"),
+    "random": dict(linestyle="--", marker="x", label="Random"),
+}
+
+FIG_OUTPUT = Path("fig_active_learning_both_representations_paired.pdf")
+
 
 # -------------------------------------------------
-# Plotting: 1 figure, 4 subplots (rows = representation, cols = metric)
+# Plotting: 1 figure, 2 subplots (cols = metric); both representations overlaid
 # -------------------------------------------------
 
-def plot_all(results):
-    """results: {repr_name: rows}. One row of subplots per representation,
-    columns = (balanced accuracy, ROC AUC)."""
+def plot_all(results, out_path: Path = FIG_OUTPUT):
+    """results: {repr_name: rows}. One figure, columns = (balanced accuracy,
+    ROC AUC). Both representations are drawn on the same axes:
+        colour     -> representation (handcrafted / LaBraM)
+        line/marker -> strategy       (active = solid/o, random = dashed/x)
+    """
     metrics = [("bacc", "Balanced accuracy"), ("roc_auc", "ROC AUC")]
     repr_names = list(results.keys())
-    n_rows = len(repr_names)
 
-    fig, axes = plt.subplots(n_rows, 2, figsize=(13, 5 * n_rows), sharex=True)
-    if n_rows == 1:
-        axes = axes[np.newaxis, :]
+    fig, axes = plt.subplots(1, len(metrics), figsize=(13, 5.2),
+                             sharex=True, sharey=True)
+    axes = np.atleast_1d(axes)
 
-    for r, repr_name in enumerate(repr_names):
-        cfg = REPRESENTATIONS[repr_name]
-        rows = results[repr_name]
-        by_strategy = {s: [x for x in rows if x["strategy"] == s] for s in STRATEGIES}
+    for c, (metric, ylabel) in enumerate(metrics):
+        ax = axes[c]
+        for repr_name in repr_names:
+            cfg = REPRESENTATIONS[repr_name]
+            col = cfg["color"]
+            rows = results[repr_name]
+            by_strategy = {s: [x for x in rows if x["strategy"] == s] for s in STRATEGIES}
 
-        strategy_style = {
-            "active": dict(color=cfg["active_color"],
-                           label="Active (uncertainty + density)"),
-            "random": dict(color="tab:gray", label="Random baseline"),
-        }
-
-        for c, (metric, ylabel) in enumerate(metrics):
-            ax = axes[r, c]
             for strategy in STRATEGIES:
                 srows = sorted(by_strategy[strategy], key=lambda x: x["n_shot"])
                 xs = np.array([x["n_shot"] for x in srows])
                 means = np.array([x[metric] for x in srows], dtype=float)
                 stds = np.array([x[f"{metric}_std"] for x in srows], dtype=float)
 
-                style = strategy_style[strategy]
-                ax.plot(xs, means, marker="o", color=style["color"], label=style["label"])
-                ax.fill_between(xs, means - stds, means + stds, alpha=0.15,
-                                color=style["color"])
+                st = STRATEGY_STYLE[strategy]
+                label = f"{cfg['title']} — {st['label']}"
+                ax.plot(
+                    xs, means, color=col,
+                    linestyle=st["linestyle"], marker=st["marker"], markersize=5,
+                    linewidth=1.8, label=label,
+                )
+                ax.fill_between(xs, means - stds, means + stds, alpha=0.12, color=col)
 
-            ax.set_title(f"{cfg['title']} — {ylabel}")
-            ax.set_xlabel("n_shot (labels per class equivalent)")
-            ax.set_ylabel(ylabel)
-            ax.set_ylim(0.0, 1.0)
-            ax.xaxis.set_major_locator(MultipleLocator(2))
-            ax.grid(alpha=0.3)
-            ax.legend()
+        ax.set_title(ylabel)
+        ax.set_ylim(0.0, 1.0)
+        ax.xaxis.set_major_locator(MultipleLocator(2))
+        ax.grid(alpha=0.3)
+        ax.set_xlabel("n_shot (labels per class equivalent)")
+        if c == 0:
+            ax.set_ylabel("Score")
 
-    fig.suptitle("Active learning vs random — pool: annotation-centered, "
-                 "test: sliding", fontsize=13)
-    fig.tight_layout(rect=[0, 0, 1, 0.98])
+    # One shared legend below both subplots (4 entries, grouped 2 per row).
+    handles, labels = axes[0].get_legend_handles_labels()
+    fig.legend(
+        handles, labels, loc="lower center", ncol=2,
+        frameon=True, bbox_to_anchor=(0.5, 0.0),
+        columnspacing=1.5, handletextpad=0.6,
+    )
 
-    out_path = "results_active_learning_both_representations.png"
-    fig.savefig(out_path, dpi=150)
-    print(f"\nCombined plot saved to: {out_path}")
+    fig.suptitle("Active learning vs random — pool: annotation-centered, test: sliding")
+    # Reserve room for the bottom legend + suptitle (tight_layout ignores fig.legend).
+    fig.subplots_adjust(left=0.07, right=0.98, top=0.90, bottom=0.22, wspace=0.10)
+
+    fig.savefig(out_path, bbox_inches="tight")
+    fig.savefig(out_path.with_suffix(".png"), dpi=200, bbox_inches="tight")
+    print(f"\nCombined plot saved to: {out_path} and {out_path.with_suffix('.png')}")
 
 
 # -------------------------------------------------
