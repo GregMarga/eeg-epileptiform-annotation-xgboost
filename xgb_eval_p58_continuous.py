@@ -3,8 +3,10 @@ xgb_eval_p58.py
 ================
 Train XGBoost on all patients EXCEPT P58, evaluate on P58.
 
-Runs BOTH modes ("handcrafted" and "labram") in a single execution and
-plots the results side-by-side as two subplots in one combined figure.
+Runs BOTH modes ("handcrafted" and "labram") in a single execution and plots
+the results as ONE grouped bar chart so the two representations can be compared
+directly: for each metric, the handcrafted bar (solid) sits next to the LaBraM
+bar (hatched). Colour encodes the metric; fill vs hatch encodes representation.
 
   THR  : decision threshold for the positive class
 """
@@ -314,69 +316,96 @@ def run_mode(mode: str, thr: float):
 
 
 # -------------------------------------------------
-# Plot (combined, one subplot per mode)
+# Plot: ONE grouped bar chart, handcrafted vs LaBraM side by side per metric
 # -------------------------------------------------
+# colour  -> metric (kept from the original per-metric colours)
+# fill/hatch -> representation (handcrafted = solid, LaBraM = hatched),
+#               matching the Figure 6 convention.
 
-def _plot_single_ax(ax, m: dict, train_patients: list[str], mode: str, thr: float):
-    mode_label = (
-        "Handcrafted features"
-        if mode == "handcrafted"
-        else "LaBraM embeddings"
-    )
+FIG_OUTPUT = Path("fig_xgb_eval_p58_paired.pdf")
 
+
+def plot_results_combined(
+    m_handcrafted: dict, train_patients_hc: list[str],
+    m_labram: dict, train_patients_lb: list[str],
+    thr: float, out_path: Path = FIG_OUTPUT,
+):
     metrics = [
         ("bacc",    "Balanced Accuracy"),
         ("roc_auc", "ROC AUC"),
         ("f1",      "F1"),
         ("pr_auc",  "PR AUC"),
     ]
-    values = [m[k] for k, _ in metrics]
-    labels = [label for _, label in metrics]
+    metric_colors = ["tab:blue", "tab:orange", "tab:green", "tab:purple"]
+    labels = [lab for _, lab in metrics]
+    vals_hc = [m_handcrafted[k] for k, _ in metrics]
+    vals_lb = [m_labram[k] for k, _ in metrics]
 
-    bars = ax.bar(labels, values, color=["tab:blue", "tab:orange", "tab:green", "tab:purple"])
-    ax.set_ylim(0.0, 1.0)
-    ax.set_ylabel("Score")
-    ax.set_title(
-        f"train: {', '.join(train_patients)}\n"
-        f"test: {EVAL_PATIENT_ID} ({PATIENT_PATTERN.get(EVAL_PATIENT_ID, '?')}) — {mode_label}",
-        fontsize=9,
+    x = np.arange(len(metrics))
+    width = 0.4  # two half-width bars per metric
+
+    plt.rcParams["hatch.linewidth"] = 0.8
+    fig, ax = plt.subplots(figsize=(10, 5.5))
+
+    bars_hc = ax.bar(
+        x - width / 2, vals_hc, width,
+        color=metric_colors, edgecolor="black", linewidth=0.5,
     )
-    ax.grid(axis="y", alpha=0.3)
-    for bar, val in zip(bars, values):
-        ax.text(
-            bar.get_x() + bar.get_width() / 2,
-            val + 0.02,
-            f"{val:.3f}",
-            ha="center", va="bottom", fontsize=10,
-        )
+    bars_lb = ax.bar(
+        x + width / 2, vals_lb, width,
+        color=metric_colors, edgecolor="black", linewidth=0.5, hatch="///",
+    )
 
-    confusion_text = (
-        f"TP={int(m['tp'])}  FP={int(m['fp'])}  "
-        f"TN={int(m['tn'])}  FN={int(m['fn'])}  |  thr={thr}"
+    # Value labels on top of each bar.
+    for bars, vals in ((bars_hc, vals_hc), (bars_lb, vals_lb)):
+        for bar, val in zip(bars, vals):
+            ax.text(
+                bar.get_x() + bar.get_width() / 2, val + 0.02,
+                f"{val:.3f}", ha="center", va="bottom", fontsize=8,
+            )
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels)
+    ax.set_ylim(0.0, 1.05)
+    ax.set_ylabel("Score")
+    ax.grid(axis="y", alpha=0.3)
+
+    pat = PATIENT_PATTERN.get(EVAL_PATIENT_ID, "?")
+    train_note = (
+        ", ".join(train_patients_hc)
+        if train_patients_hc == train_patients_lb
+        else "all patients except " + EVAL_PATIENT_ID
+    )
+    fig.suptitle(
+        f"XGBoost baseline on {EVAL_PATIENT_ID} ({pat}) — Handcrafted vs LaBraM",
+        fontsize=12,
+    )
+    ax.set_title(f"train: {train_note}", fontsize=8, color="dimgray")
+
+    # Representation legend (solid vs hatched).
+    rep_legend = [
+        Patch(facecolor="0.8", edgecolor="black", label="Handcrafted"),
+        Patch(facecolor="0.8", edgecolor="black", hatch="///", label="LaBraM"),
+    ]
+    ax.legend(handles=rep_legend, title="Representation",
+              loc="upper left", bbox_to_anchor=(1.01, 1.0))
+
+    # Confusion counts for both representations, below the axes.
+    conf_text = (
+        f"Handcrafted:  TP={int(m_handcrafted['tp'])}  FP={int(m_handcrafted['fp'])}  "
+        f"TN={int(m_handcrafted['tn'])}  FN={int(m_handcrafted['fn'])}      "
+        f"LaBraM:  TP={int(m_labram['tp'])}  FP={int(m_labram['fp'])}  "
+        f"TN={int(m_labram['tn'])}  FN={int(m_labram['fn'])}      (thr={thr})"
     )
     ax.text(
-        0.5, -0.18, confusion_text,
-        ha="center", va="top", fontsize=9, color="dimgray",
-        transform=ax.transAxes,
+        0.5, -0.12, conf_text, ha="center", va="top", fontsize=8,
+        color="dimgray", transform=ax.transAxes,
     )
 
-
-def plot_results_combined(
-    m_handcrafted: dict, train_patients_hc: list[str],
-    m_labram: dict, train_patients_lb: list[str],
-    thr: float,
-):
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5.5))
-
-    _plot_single_ax(axes[0], m_handcrafted, train_patients_hc, "handcrafted", thr)
-    _plot_single_ax(axes[1], m_labram, train_patients_lb, "labram", thr)
-
-    fig.suptitle(f"XGBoost — baseline evaluation on {EVAL_PATIENT_ID}", fontsize=12)
-    fig.tight_layout(rect=[0, 0.05, 1, 0.95])
-
-    plot_path = "results_xgb_eval_p58_combined.png"
-    plt.savefig(plot_path, dpi=150)
-    print(f"\nCombined plot saved to: {plot_path}")
+    fig.subplots_adjust(left=0.08, right=0.86, top=0.90, bottom=0.16)
+    fig.savefig(out_path, bbox_inches="tight")
+    fig.savefig(out_path.with_suffix(".png"), dpi=200, bbox_inches="tight")
+    print(f"\nCombined plot saved to: {out_path} and {out_path.with_suffix('.png')}")
     plt.show()
 
 
