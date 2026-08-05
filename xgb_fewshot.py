@@ -129,6 +129,15 @@ def train_xgb(x_train: np.ndarray, y_train: np.ndarray) -> XGBClassifier:
         n_jobs=-1,
         scale_pos_weight=scale_pos_weight,
         random_state=42,
+        # min_child_weight=0 removes the low-sample artefact. The default (1),
+        # combined with the logistic-loss Hessian (~0.25 per window at the
+        # initial prediction), requires the summed Hessian on each side of a
+        # split to be >= 1 (~4 windows per child, ~8 in total), which forbids
+        # ANY split below ~8 training windows and collapses the 1-3 shot points
+        # to a constant 0.50. Setting it to 0 lets a split form even with very
+        # few windows, so those points now reflect the model's actual (weak)
+        # low-sample behavior instead of the artefact.
+        min_child_weight=0,
     )
     model.fit(x_train, y_train)
     return model
@@ -266,57 +275,70 @@ def save_rows(rows: list[dict[str, float]], csv_output: Path):
 
 
 # -------------------------------------------------
-# Plotting
+# Plotting: 1 figure, 2 subplots (cols = metric); BOTH modes overlaid per axis
 # -------------------------------------------------
 
 MODE_TITLES = {"handcrafted": "Handcrafted", "labram": "LaBraM"}
 MODE_COLORS = {"handcrafted": "tab:orange", "labram": "tab:blue"}
 
-# (metric key, axis label) for each plotted row
+# (metric key, axis label) for each plotted column
 PLOT_METRICS = [
     ("bacc",    "Balanced accuracy"),
     ("roc_auc", "ROC AUC"),
 ]
 
+FIG_OUTPUT = Path("fig7_xgb_fewshot_paired.pdf")
 
-def plot_all(results: dict[str, list[dict]]):
-    """Single figure, 2x2 grid: rows = metric, columns = mode."""
-    n_rows = len(PLOT_METRICS)
-    n_cols = len(MODES)
+
+def plot_all(results: dict[str, list[dict]], out_path: Path = FIG_OUTPUT):
+    """Single figure, 1x2: columns = metric (balanced accuracy, ROC AUC).
+    Handcrafted and LaBraM are drawn on the SAME axes (colour = representation)."""
     fig, axes = plt.subplots(
-        n_rows, n_cols,
-        figsize=(12, 9),
-        sharex=True, sharey="row",
+        1, len(PLOT_METRICS),
+        figsize=(12, 5.2),
+        sharex=True, sharey=True,
     )
+    axes = np.atleast_1d(axes)
 
-    for r, (metric, ylabel) in enumerate(PLOT_METRICS):
-        for c, mode in enumerate(MODES):
-            ax = axes[r, c]
+    xticks = None
+    for c, (metric, ylabel) in enumerate(PLOT_METRICS):
+        ax = axes[c]
+        for mode in MODES:
             rows = results[mode]
             xs = np.array([row["n_shot"] for row in rows])
             means = np.array([row[metric] for row in rows], dtype=float)
             stds = np.array([row[f"{metric}_std"] for row in rows], dtype=float)
 
             color = MODE_COLORS[mode]
-            ax.plot(xs, means, marker="o", color=color)
-            ax.fill_between(xs, means - stds, means + stds, alpha=0.2, color=color)
+            ax.plot(xs, means, marker="o", markersize=4, linewidth=1.8,
+                    color=color, label=MODE_TITLES[mode])
+            ax.fill_between(xs, means - stds, means + stds, alpha=0.18, color=color)
+            xticks = xs
 
-            ax.set_ylim(0.0, 1.0)
-            ax.grid(alpha=0.3)
+        ax.set_title(ylabel)
+        ax.set_ylim(0.0, 1.0)
+        ax.grid(alpha=0.3)
+        ax.set_xlabel("n_shot (labels per class)")
+        if xticks is not None:
+            ax.set_xticks(xticks[::2])
+        if c == 0:
+            ax.set_ylabel("Score")
 
-            # Column titles only on the top row
-            if r == 0:
-                ax.set_title(MODE_TITLES[mode])
-            # Row label (metric) only on the leftmost column
-            if c == 0:
-                ax.set_ylabel(ylabel)
-            # x label only on the bottom row
-            if r == n_rows - 1:
-                ax.set_xlabel("n_shot")
-                ax.set_xticks(xs[::2])
+    # One shared legend below both subplots.
+    handles, labels = axes[0].get_legend_handles_labels()
+    fig.legend(
+        handles, labels, loc="lower center", ncol=2,
+        frameon=True, bbox_to_anchor=(0.5, 0.0),
+        columnspacing=1.8, handletextpad=0.6,
+    )
 
-    fig.suptitle("Few-shot sweep — Balanced accuracy & ROC AUC vs n_shot")
-    fig.tight_layout()
+    fig.suptitle("Few-shot XGBoost baseline: Handcrafted vs LaBraM")
+    # Reserve room for the bottom legend (tight_layout ignores fig.legend).
+    fig.subplots_adjust(left=0.07, right=0.98, top=0.90, bottom=0.20, wspace=0.10)
+
+    fig.savefig(out_path, bbox_inches="tight")
+    fig.savefig(out_path.with_suffix(".png"), dpi=200, bbox_inches="tight")
+    print(f"\nFigure saved to: {out_path} and {out_path.with_suffix('.png')}")
 
 
 # -------------------------------------------------
@@ -340,7 +362,6 @@ def main():
         results[mode] = rows
         save_rows(rows, Path(f"results_xgb_fewshot_{mode}.csv"))
 
-    # --- Single figure, 2x2 grid (rows = metric, columns = mode) ---
     plot_all(results)
     plt.show()
 
